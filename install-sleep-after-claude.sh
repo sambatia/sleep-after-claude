@@ -144,6 +144,7 @@ fi
 
 # ── 7. Detect shell + rc file ─────────────────────────────────────
 SHELL_NAME="$(basename "${SHELL:-/bin/zsh}")"
+RC=""
 case "$SHELL_NAME" in
   zsh)
     RC="$HOME/.zshrc"
@@ -155,23 +156,34 @@ case "$SHELL_NAME" in
       RC="$HOME/.bashrc"
     fi
     ;;
-  *)
-    warn "Unknown shell ($SHELL_NAME). Defaulting to ~/.zshrc."
-    RC="$HOME/.zshrc"
-    ;;
 esac
 
-# Ensure the rc file exists
-[[ -f "$RC" ]] || touch "$RC"
-
-# ── 8. Add alias idempotently ─────────────────────────────────────
-if grep -q "alias goodnight=" "$RC" 2>/dev/null; then
-  ok "Alias 'goodnight' already present in $(basename "$RC") — skipping"
+# ── 8. Add alias (idempotent, dedupes across reinstalls) ──────────
+if [[ -z "$RC" ]]; then
+  warn "Unknown shell ($SHELL_NAME) — skipping alias install."
+  warn "Add this line to your shell rc manually:"
+  warn "  alias goodnight=\"$HOME/bin/sleep-after-claude\""
 else
+  [[ -f "$RC" ]] || touch "$RC"
+
+  # Remove any prior `alias goodnight=` lines (and the header comment
+  # directly above them, if any) so reinstalls don't duplicate or orphan
+  # lines pointing at stale paths. Then re-append the current line.
+  if grep -q '^[[:space:]]*alias[[:space:]]\+goodnight=' "$RC" 2>/dev/null; then
+    TMP_RC="$(mktemp)"
+    awk '
+      /^# sleep-after-claude shortcut \(added by installer\)$/ { skip_next_if_alias=1; next }
+      skip_next_if_alias==1 && /^[[:space:]]*alias[[:space:]]+goodnight=/ { skip_next_if_alias=0; next }
+      /^[[:space:]]*alias[[:space:]]+goodnight=/ { skip_next_if_alias=0; next }
+      { skip_next_if_alias=0; print }
+    ' "$RC" > "$TMP_RC" && mv "$TMP_RC" "$RC"
+    say "Removed existing 'goodnight' alias line(s) in $(basename "$RC")"
+  fi
+
   {
     echo ''
     echo '# sleep-after-claude shortcut (added by installer)'
-    echo 'alias goodnight="$HOME/bin/sleep-after-claude"'
+    echo "alias goodnight=\"$HOME/bin/sleep-after-claude\""
   } >> "$RC"
   ok "Alias 'goodnight' added to $(basename "$RC")"
 fi
@@ -182,7 +194,8 @@ say "Running quick verification..."
 if "$TARGET" --help >/dev/null 2>&1; then
   ok "Script executes successfully"
 else
-  warn "Script failed to run --help. Try manually: ~/bin/sleep-after-claude --help"
+  fail "Script failed to run --help. Try manually: ~/bin/sleep-after-claude --help"
+  exit 1
 fi
 
 # ── 10. Done ──────────────────────────────────────────────────────
@@ -197,9 +210,11 @@ echo -e "    ${C_CYAN}goodnight --help${C_RESET}         # show all options"
 echo -e "    ${C_CYAN}goodnight --preflight${C_RESET}    # audit your system"
 echo -e "    ${C_CYAN}goodnight${C_RESET}                # watch Claude + sleep when done"
 echo ""
-echo -e "  ${C_DIM}Or, to use in this terminal right now:${C_RESET}"
-echo -e "    ${C_CYAN}source $RC${C_RESET}"
-echo ""
+if [[ -n "$RC" ]]; then
+  echo -e "  ${C_DIM}Or, to use in this terminal right now:${C_RESET}"
+  echo -e "    ${C_CYAN}source $RC${C_RESET}"
+  echo ""
+fi
 
 exit 0
 
