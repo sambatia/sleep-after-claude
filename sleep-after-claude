@@ -65,6 +65,12 @@ SKIP_PREFLIGHT=false
 FORCE=false
 BRIEF=false
 JSON_OUTPUT=false
+SKIP_UPDATE_CHECK=false
+NO_AUTO_CAFFEINATE=false
+UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
+UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
+UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
+UPDATE_CACHE_TTL_SECS=86400  # 24h rate-limit on network checks
 
 # ── Helpers ───────────────────────────────────────────────────
 print_header() {
@@ -664,6 +670,291 @@ print_post_watch_blockers() {
   log_event "POST_WATCH_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
 }
 
+# ── Blocker classification ────────────────────────────────────
+# System-managed processes (launchd-supervised Apple daemons) cannot
+# be killed by the user without sudo, and macOS respawns them anyway.
+# The user must instead quit the consumer app that triggered the
+# assertion (e.g., quit Zoom to release cameracaptured's hold).
+#
+# These names include camera/audio/display daemons that commonly hold
+# PreventUserIdleSystemSleep while a video app is active.
+SYSTEM_MANAGED_BLOCKERS_REGEX='^(cameracaptured|mediaanalysisd|screencaptureui|replayd|avconferenced|WirelessRadioManagerd|kernel_task|launchd)$'
+
+# Return "system" if the blocker name is system-managed, "user" otherwise.
+classify_blocker() {
+  local name="$1"
+  if [[ "$name" =~ $SYSTEM_MANAGED_BLOCKERS_REGEX ]]; then
+    echo "system"
+  else
+    echo "user"
+  fi
+}
+
+# Print a suggested action for a system-managed blocker so the user
+# knows what to do instead of asking us to kill it.
+system_blocker_hint() {
+  local name="$1"
+  case "$name" in
+    cameracaptured) echo "Camera is in use — quit Zoom/Meet/FaceTime/Chrome tabs/Continuity Camera." ;;
+    mediaanalysisd) echo "Photos is analyzing media — will release on its own shortly." ;;
+    screencaptureui|replayd) echo "Screen recording is active — stop the recording." ;;
+    avconferenced) echo "A call/conference app is active — end the call." ;;
+    *)               echo "System-managed — quit the app that triggered this assertion." ;;
+  esac
+}
+
+# Present the blocker-handling menu and act on the user's choice.
+# Returns 0 on "proceed with watch" (either skipped or after successful
+# termination), non-zero on "abort".
+prompt_and_handle_blockers() {
+  local entry pid name type kind
+  local user_blockers=() system_blockers=()
+
+  for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+    IFS='|' read -r pid name type <<< "$entry"
+    kind="$(classify_blocker "$name")"
+    if [[ "$kind" == "system" ]]; then
+      system_blockers+=("$entry")
+    else
+      user_blockers+=("$entry")
+    fi
+  done
+
+  echo ""
+  echo -e "  ${BOLD}${YELLOW}Sleep blockers detected${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if [[ ${#user_blockers[@]} -gt 0 ]]; then
+    echo -e "  ${BOLD}User apps${RESET} ${DIM}(can be terminated):${RESET}"
+    for entry in "${user_blockers[@]}"; do
+      IFS='|' read -r pid name type <<< "$entry"
+      echo -e "    ${RED}✖${RESET} ${BOLD}${name}${RESET} (PID $pid) — ${type}"
+    done
+    echo ""
+  fi
+  if [[ ${#system_blockers[@]} -gt 0 ]]; then
+    echo -e "  ${BOLD}System-managed${RESET} ${DIM}(cannot be killed — requires your action):${RESET}"
+    for entry in "${system_blockers[@]}"; do
+      IFS='|' read -r pid name type <<< "$entry"
+      echo -e "    ${YELLOW}⚠${RESET}  ${BOLD}${name}${RESET} (PID $pid) — ${type}"
+      echo -e "       ${DIM}→ $(system_blocker_hint "$name")${RESET}"
+    done
+    echo ""
+  fi
+
+  if [[ "$FORCE" == true ]]; then
+    print_warn "${#PREFLIGHT_BLOCKERS[@]} blocker(s) detected but --force was given — proceeding."
+    return 0
+  fi
+
+  if [[ "$STDIN_IS_TTY" != true ]]; then
+    print_error "Sleep blockers detected and stdin is not a TTY for confirmation."
+    print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+    return 1
+  fi
+
+  echo -e "  ${BOLD}How would you like to proceed?${RESET}"
+  if [[ ${#user_blockers[@]} -gt 0 ]]; then
+    echo -e "    ${CYAN}[t]${RESET} Attempt to terminate the ${#user_blockers[@]} user app(s) listed above ${DIM}(recommended)${RESET}"
+  fi
+  echo -e "    ${CYAN}[s]${RESET} Skip — proceed with watch; sleep may not succeed"
+  echo -e "    ${CYAN}[a]${RESET} Abort — I'll handle these manually"
+  echo ""
+  local choice
+  printf "  Choice [%st/s/a]: " ""
+  if [[ ${#user_blockers[@]} -eq 0 ]]; then
+    printf "\r  Choice [s/a]: "
+  fi
+  read -r choice
+  choice="$(echo "$choice" | tr '[:upper:]' '[:lower:]')"
+  case "$choice" in
+    t|terminate)
+      if [[ ${#user_blockers[@]} -eq 0 ]]; then
+        print_warn "No user-killable blockers — only system-managed ones remain. Skipping terminate."
+        return 0
+      fi
+      terminate_user_blockers "${user_blockers[@]}"
+      # Re-scan so the next render reflects reality.
+      scan_assertions
+      if [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
+        print_ok "All blockers cleared."
+      else
+        print_warn "${#PREFLIGHT_BLOCKERS[@]} blocker(s) remain after termination (likely system-managed):"
+        for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+          IFS='|' read -r pid name type <<< "$entry"
+          echo -e "    ${YELLOW}⚠${RESET}  ${name} (PID $pid) — ${type}"
+        done
+        print_step "Proceeding with watch anyway."
+      fi
+      return 0
+      ;;
+    s|skip)
+      print_warn "Skipping termination. Sleep may not succeed after Claude finishes."
+      return 0
+      ;;
+    a|abort|"")
+      print_warn "Aborted. Claude is still running; caffeinate untouched."
+      return 1
+      ;;
+    *)
+      print_warn "Unrecognized choice — aborting for safety."
+      return 1
+      ;;
+  esac
+}
+
+# Send SIGTERM to each user blocker, wait up to 2 seconds, escalate to
+# SIGKILL if still alive. Reports per-blocker success/failure. Never
+# attempts to kill system-managed processes (caller has already
+# filtered them out).
+terminate_user_blockers() {
+  local entry pid name type
+  local stopped=() survived=()
+  echo ""
+  print_step "Terminating user-app blockers..."
+  for entry in "$@"; do
+    IFS='|' read -r pid name type <<< "$entry"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      stopped+=("$name (PID $pid, already gone)")
+      continue
+    fi
+    if kill "$pid" 2>/dev/null; then
+      # Poll up to 2 seconds for graceful exit.
+      local i
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        if kill -9 "$pid" 2>/dev/null; then
+          stopped+=("$name (PID $pid, SIGKILL)")
+          log_event "BLOCKER_SIGKILL pid=$pid name=\"$name\""
+        else
+          survived+=("$name (PID $pid)")
+          log_event "BLOCKER_KILL_FAILED pid=$pid name=\"$name\""
+        fi
+      else
+        stopped+=("$name (PID $pid)")
+        log_event "BLOCKER_STOPPED pid=$pid name=\"$name\""
+      fi
+    else
+      survived+=("$name (PID $pid, kill denied)")
+      log_event "BLOCKER_KILL_DENIED pid=$pid name=\"$name\""
+    fi
+  done
+  if [[ ${#stopped[@]} -gt 0 ]]; then
+    print_ok "Stopped ${#stopped[@]} blocker(s):"
+    for s in "${stopped[@]}"; do
+      echo -e "    ${GREEN}✔${RESET} ${DIM}${s}${RESET}"
+    done
+  fi
+  if [[ ${#survived[@]} -gt 0 ]]; then
+    print_warn "${#survived[@]} blocker(s) could not be stopped:"
+    for s in "${survived[@]}"; do
+      echo -e "    ${RED}✖${RESET} ${DIM}${s}${RESET}"
+    done
+  fi
+}
+
+# ── Auto-start caffeinate -dim if none is running ─────────────
+# Ensures the Mac stays awake while we watch. If the user (or another
+# tool) already has caffeinate running, we leave it alone — the end-
+# of-watch release step will stop all caffeinate PIDs captured at
+# start.
+AUTO_STARTED_CAFFEINATE_PID=""
+ensure_caffeinate_running() {
+  [[ "$NO_AUTO_CAFFEINATE" == true ]] && return 0
+  local existing
+  existing="$(pgrep -u "$USER" caffeinate 2>/dev/null || true)"
+  if [[ -n "$existing" ]]; then
+    print_ok "caffeinate already running (PIDs: $(echo "$existing" | tr '\n' ' '))— leaving as-is"
+    return 0
+  fi
+  # Start caffeinate -dim in the background, detached from this shell
+  # so it survives after we exit. `disown` suppresses the "terminated"
+  # message when we eventually kill it.
+  caffeinate -dim &
+  AUTO_STARTED_CAFFEINATE_PID=$!
+  disown "$AUTO_STARTED_CAFFEINATE_PID" 2>/dev/null || true
+  # Tiny delay so pmset sees the assertion next time we scan.
+  sleep 0.2
+  print_ok "Started ${BOLD}caffeinate -dim${RESET} (PID $AUTO_STARTED_CAFFEINATE_PID) to keep the Mac awake"
+  log_event "AUTO_CAFFEINATE_STARTED pid=$AUTO_STARTED_CAFFEINATE_PID"
+}
+
+# ── Self-update check ─────────────────────────────────────────
+# Compares the running script's sha256 to the remote canonical script.
+# Rate-limited to once per UPDATE_CACHE_TTL_SECS (default 24h) via a
+# timestamp file under ~/.cache/sleep-after-claude. Fails open:
+# network errors, missing curl/shasum, or any unexpected output cause
+# the check to be silently skipped so offline users aren't blocked.
+check_for_update() {
+  [[ "$SKIP_UPDATE_CHECK" == true ]] && return 0
+  command -v curl >/dev/null 2>&1    || return 0
+  command -v shasum >/dev/null 2>&1  || return 0
+
+  mkdir -p "$UPDATE_CACHE_DIR" 2>/dev/null || return 0
+  local stamp="$UPDATE_CACHE_DIR/last-update-check"
+  if [[ -f "$stamp" ]]; then
+    local last_ts now_ts
+    last_ts="$(cat "$stamp" 2>/dev/null || echo 0)"
+    now_ts="$(date +%s)"
+    if [[ "$last_ts" =~ ^[0-9]+$ ]] && (( now_ts - last_ts < UPDATE_CACHE_TTL_SECS )); then
+      return 0
+    fi
+  fi
+
+  # Download remote script with a short timeout so the check never
+  # blocks for long on a slow network.
+  local tmp_remote
+  tmp_remote="$(mktemp -t sac-update-check.XXXXXX 2>/dev/null)" || return 0
+  if ! curl -fsSL --max-time 5 "$UPDATE_CHECK_URL" -o "$tmp_remote" 2>/dev/null; then
+    rm -f "$tmp_remote"
+    return 0
+  fi
+  # Basic sanity so a CDN error page doesn't fool us.
+  if [[ ! -s "$tmp_remote" ]] || ! head -1 "$tmp_remote" | grep -q '^#!/usr/bin/env bash'; then
+    rm -f "$tmp_remote"
+    return 0
+  fi
+
+  local local_sha remote_sha self_path
+  self_path="${BASH_SOURCE[0]:-$0}"
+  [[ -f "$self_path" ]] || { rm -f "$tmp_remote"; return 0; }
+  local_sha="$(shasum -a 256 "$self_path" 2>/dev/null | awk '{print $1}')"
+  remote_sha="$(shasum -a 256 "$tmp_remote" 2>/dev/null | awk '{print $1}')"
+  rm -f "$tmp_remote"
+
+  # Record that we checked, regardless of result, to honor TTL.
+  date +%s > "$stamp" 2>/dev/null || true
+
+  if [[ -z "$local_sha" || -z "$remote_sha" ]] || [[ "$local_sha" == "$remote_sha" ]]; then
+    return 0
+  fi
+
+  echo ""
+  print_step "A newer version of sleep-after-claude is available."
+  echo -e "    ${DIM}Local sha:  ${local_sha:0:12}…${RESET}"
+  echo -e "    ${DIM}Remote sha: ${remote_sha:0:12}…${RESET}"
+  if [[ "$STDIN_IS_TTY" != true ]]; then
+    print_warn "Not a TTY — skipping update prompt. Run ${BOLD}goodnight${RESET} interactively to update."
+    return 0
+  fi
+  if prompt_confirm "${BOLD}Update now?${RESET} [y/N]:"; then
+    echo ""
+    print_step "Running installer..."
+    if curl -fsSL --max-time 30 "$UPDATE_INSTALLER_URL" | bash; then
+      echo ""
+      print_ok "Update complete — continuing with the standard goodnight flow."
+      echo ""
+    else
+      print_warn "Update failed. Continuing with the currently-installed version."
+    fi
+  else
+    echo ""
+    print_step "Skipping update. Run ${BOLD}goodnight --check-update${RESET} later to re-prompt."
+  fi
+}
+
 # ── Argument parsing ──────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -703,6 +994,13 @@ while [[ $# -gt 0 ]]; do
     --force|--yes|-f|-y) FORCE=true;            shift ;;
     --brief|-b)          BRIEF=true;            shift ;;
     --json)              JSON_OUTPUT=true;      shift ;;
+    --skip-update-check) SKIP_UPDATE_CHECK=true; shift ;;
+    --check-update)
+      # Force an immediate update check, bypassing the 24h rate-limit
+      # cache, then continue with the normal flow.
+      rm -f "$UPDATE_CACHE_DIR/last-update-check" 2>/dev/null || true
+      shift ;;
+    --no-auto-caffeinate) NO_AUTO_CAFFEINATE=true; shift ;;
     --help|-h)
       echo ""
       echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
@@ -723,6 +1021,9 @@ while [[ $# -gt 0 ]]; do
       echo -e "    --preflight, -P       Run pre-flight scan only, then exit"
       echo -e "    --no-preflight        Skip pre-flight scan entirely"
       echo -e "    --force, -f           Skip confirmation prompts"
+      echo -e "    --skip-update-check   Don't check for a newer version on startup"
+      echo -e "    --check-update        Force update check now (bypass 24h cache)"
+      echo -e "    --no-auto-caffeinate  Don't auto-start caffeinate -dim if missing"
       echo ""
       echo -e "  ${DIM}Output options:${RESET}"
       echo -e "    --brief, -b           Show only the verdict in preflight output"
@@ -839,8 +1140,15 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
   exit 0
 fi
 
-# ── Detect Claude PID ─────────────────────────────────────────
+# ── Self-update check ─────────────────────────────────────────
+# Runs on the actionable path (default watch-and-sleep, --dry-run,
+# --caffeinate-only, --wait-for-start). Skipped for pure introspection
+# modes (--help/--list/--preflight) which returned above. Rate-limited
+# to once per 24h via ~/.cache/sleep-after-claude/last-update-check.
 print_header
+check_for_update
+
+# ── Detect Claude PID ─────────────────────────────────────────
 
 if [[ -z "$TARGET_PID" ]]; then
   MATCHES="$(find_claude_processes)"
@@ -925,27 +1233,25 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
     fi
   elif [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
     log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
-    if [[ "$FORCE" == false ]]; then
-      if [[ "$STDIN_IS_TTY" == true ]]; then
-        if ! prompt_confirm "${BOLD}Proceed anyway?${RESET} [y/N]:"; then
-          print_warn "Aborted by user. Claude is still running; caffeinate untouched."
-          echo ""
-          exit 0
-        fi
-        echo ""
-      else
-        print_error "Sleep blockers detected and stdin is not a TTY for confirmation."
-        print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
-        exit 1
-      fi
-    else
-      print_warn "${#PREFLIGHT_BLOCKERS[@]} blocker(s) detected but --force was given — proceeding."
+    # Interactive blocker-handling menu: terminate (user apps only),
+    # skip, or abort. --force short-circuits to "skip with warning".
+    if ! prompt_and_handle_blockers; then
       echo ""
+      exit 0
     fi
+    echo ""
   fi
 fi
 
+# ── Ensure caffeinate is running ──────────────────────────────
+# If no caffeinate is active we start one now so the Mac doesn't
+# drift to sleep while we're watching. Skippable with
+# --no-auto-caffeinate for users who manage caffeinate themselves.
+ensure_caffeinate_running
+
 # ── Capture caffeinate PIDs at start ──────────────────────────
+# Captured AFTER ensure_caffeinate_running so any auto-started
+# caffeinate is included and will be released at the end of watch.
 # shellcheck disable=SC2207
 INITIAL_CAFF_PIDS=( $(pgrep caffeinate 2>/dev/null || true) )
 
