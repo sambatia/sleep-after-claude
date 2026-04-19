@@ -344,6 +344,7 @@ SKIP_UPDATE_CHECK=false
 NO_AUTO_CAFFEINATE=false
 ALLOW_BATTERY=false
 LOG_SUMMARY=false
+SLEEP_NOW=false
 UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
 UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
 UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
@@ -1668,6 +1669,13 @@ while [[ $# -gt 0 ]]; do
       LOG_SUMMARY=true
       shift
       ;;
+    --sleep-now)
+      # Skip Claude detection and the watch loop entirely. Run
+      # preflight, interactively handle blockers, ensure caffeinate
+      # is released, then sleep immediately.
+      SLEEP_NOW=true
+      shift
+      ;;
     --help | -h)
       echo ""
       echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
@@ -1693,6 +1701,7 @@ while [[ $# -gt 0 ]]; do
       echo -e "    --no-auto-caffeinate  Don't auto-start caffeinate -dim if missing"
       echo -e "    --allow-battery       Proceed even if the Mac is on battery (default: wait for AC)"
       echo -e "    --log-summary         Render the session log as pretty markdown (needs ~/.local/state log)"
+      echo -e "    --sleep-now           Skip the watch — preflight + handle blockers + sleep immediately"
       echo ""
       echo -e "  ${DIM}Output options:${RESET}"
       echo -e "    --brief, -b           Show only the verdict in preflight output"
@@ -1867,6 +1876,72 @@ wait_for_ac_power
 # to once per 24h via ~/.cache/sleep-after-claude/last-update-check.
 check_for_update
 
+# ── --sleep-now fast path ─────────────────────────────────────
+# Skips Claude detection and the watch loop entirely. Runs preflight,
+# interactively handles blockers, releases/auto-starts caffeinate as
+# usual, then sleeps immediately. For when the user knows they want
+# to sleep now regardless of any running Claude sessions (e.g.,
+# idle Claude REPLs left open from earlier).
+if [[ "$SLEEP_NOW" == true ]]; then
+  if [[ "$SKIP_PREFLIGHT" == false ]]; then
+    preflight_scan
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      render_preflight_json
+    else
+      render_preflight
+    fi
+    if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
+      log_event "PREFLIGHT_SCAN_FAILED (sleep-now)"
+      if [[ "$FORCE" == false ]]; then
+        if [[ "$STDIN_IS_TTY" == true ]]; then
+          if ! ui_confirm "Sleep-blocker scan failed. Proceed anyway?"; then
+            print_warn "Aborted by user."
+            echo ""
+            exit 0
+          fi
+          echo ""
+        else
+          print_error "Sleep-blocker scan failed and stdin is not a TTY for confirmation."
+          exit 1
+        fi
+      fi
+    elif [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
+      log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]} (sleep-now)"
+      if ! prompt_and_handle_blockers; then
+        echo ""
+        exit 0
+      fi
+      echo ""
+    fi
+  fi
+  # Release any caffeinate processes already running so macOS is free
+  # to sleep. Don't auto-start a new one — we're sleeping immediately.
+  # shellcheck disable=SC2207
+  SLEEP_NOW_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  if [[ ${#SLEEP_NOW_CAFF_PIDS[@]} -gt 0 ]]; then
+    print_step "Releasing caffeinate (${SLEEP_NOW_CAFF_PIDS[*]})..."
+    kill "${SLEEP_NOW_CAFF_PIDS[@]}" 2>/dev/null || true
+  fi
+  echo ""
+  print_step "Sleeping Mac in ${BOLD}${DELAY_SECS}s${RESET}..."
+  play_sound
+  sleep "$DELAY_SECS"
+  echo ""
+  echo -e "  ${BOLD}${GREEN}Good night 🌙${RESET}"
+  echo ""
+  log_event "SLEEP_ATTEMPT (sleep-now)"
+  if pmset sleepnow 2>/dev/null; then
+    exit 0
+  elif osascript -e 'tell application "System Events" to sleep' 2>/dev/null; then
+    exit 0
+  else
+    print_error "Could not trigger sleep automatically."
+    print_warn "Run manually: ${BOLD}pmset sleepnow${RESET}"
+    log_event "SLEEP_FAILED (sleep-now)"
+    exit 1
+  fi
+fi
+
 # ── Detect Claude PID ─────────────────────────────────────────
 
 if [[ -z "$TARGET_PID" ]]; then
@@ -1992,6 +2067,8 @@ fi
 [[ "$LOG_ENABLED" == true ]] && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
 [[ "$USE_SPINNER" == false ]] && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
 print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
+echo -e "  ${DIM}Tip: an idle Claude REPL won't exit on its own — if you want"
+echo -e "  ${DIM}to sleep right now instead of waiting, run ${BOLD}goodnight --sleep-now${RESET}${DIM}.${RESET}"
 echo ""
 
 log_event "WATCH_START pid=$TARGET_PID cmd=\"$TARGET_CMD\""
