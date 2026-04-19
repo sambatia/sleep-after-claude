@@ -68,9 +68,24 @@ fi
 # ── 5. Extract embedded script ────────────────────────────────────
 say "Extracting sleep-after-claude to ~/bin/..."
 
-# Find the __SCRIPT_START__ marker and extract everything between it and __SCRIPT_END__
+# When run as `curl ... | bash`, BASH_SOURCE[0] and $0 are "bash" (not a file),
+# so awk can't read the installer. In that case, re-download it to a temp file.
 SELF="${BASH_SOURCE[0]:-$0}"
+TMP_SELF=""
+if [[ ! -f "$SELF" ]]; then
+  SOURCE_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
+  TMP_SELF="$(mktemp -t sleep-after-claude-installer.XXXXXX)"
+  if ! curl -fsSL "$SOURCE_URL" -o "$TMP_SELF"; then
+    fail "Could not re-download installer from $SOURCE_URL"
+    rm -f "$TMP_SELF"
+    exit 1
+  fi
+  SELF="$TMP_SELF"
+fi
+
 awk '/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag' "$SELF" > "$TARGET"
+
+[[ -n "$TMP_SELF" ]] && rm -f "$TMP_SELF"
 
 if [[ ! -s "$TARGET" ]]; then
   fail "Extraction failed — installer file may be corrupted."
