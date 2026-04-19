@@ -313,6 +313,7 @@ BRIEF=false
 JSON_OUTPUT=false
 SKIP_UPDATE_CHECK=false
 NO_AUTO_CAFFEINATE=false
+ALLOW_BATTERY=false
 UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
 UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
 UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
@@ -1127,6 +1128,96 @@ ensure_caffeinate_running() {
   log_event "AUTO_CAFFEINATE_STARTED pid=$AUTO_STARTED_CAFFEINATE_PID"
 }
 
+# ── Power-state gate ──────────────────────────────────────────
+# Returns "AC", "Battery", or "Unknown".
+# Unknown is returned on desktop Macs without a battery, or when
+# pmset can't be parsed — in both cases we treat it like AC because
+# there's no battery to protect.
+get_power_source() {
+  local batt
+  batt="$(pmset -g batt 2>/dev/null)"
+  if [[ -z "$batt" ]]; then
+    echo "Unknown"; return
+  fi
+  if echo "$batt" | grep -q "'AC Power'"; then
+    echo "AC"
+  elif echo "$batt" | grep -q "'Battery Power'"; then
+    echo "Battery"
+  else
+    echo "Unknown"
+  fi
+}
+
+# Extract the battery percent if present (e.g., "62%"), else empty.
+get_battery_percent() {
+  pmset -g batt 2>/dev/null | grep -oE '[0-9]+%' | head -1
+}
+
+# Block until external power is connected. If already on AC (or
+# unknown power state), returns immediately. When on battery, shows a
+# calm warning, then polls pmset every 2 seconds with a spinner.
+# Honored flags:
+#   --allow-battery : skip the gate entirely
+#   --force         : also skips the gate (general "don't block me" override)
+# Ctrl+C cleanly aborts via the existing on_interrupt trap.
+wait_for_ac_power() {
+  [[ "$ALLOW_BATTERY" == true ]] && return 0
+  [[ "$FORCE" == true ]]         && return 0
+
+  local src pct
+  src="$(get_power_source)"
+  if [[ "$src" != "Battery" ]]; then
+    return 0
+  fi
+
+  pct="$(get_battery_percent)"
+  echo ""
+  echo -e "  ${BOLD}${YELLOW}⚡  External power required${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  echo -e "  ${YELLOW}Your Mac is running on battery${pct:+ (${pct})}.${RESET}"
+  echo -e "  ${DIM}For long unattended tasks, please connect your charger.${RESET}"
+  echo -e "  ${DIM}goodnight will resume automatically the moment AC power is detected.${RESET}"
+  echo -e "  ${DIM}Press Ctrl+C to abort, or re-run with --allow-battery to override.${RESET}"
+  echo ""
+  log_event "POWER_GATE_WAITING battery_pct=${pct:-unknown}"
+
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  local tick=0
+  local start_ts now_ts elapsed
+  start_ts=$(date +%s)
+
+  # Poll loop. Use plain `sleep 2` — the FIFO-based micro_sleep isn't
+  # set up yet at this point in the flow.
+  while true; do
+    src="$(get_power_source)"
+    if [[ "$src" != "Battery" ]]; then
+      break
+    fi
+    now_ts=$(date +%s)
+    elapsed=$(( now_ts - start_ts ))
+    pct="$(get_battery_percent)"
+    if [[ "$USE_SPINNER" == true ]]; then
+      printf "\r  ${CYAN}${frames[$tick]}${RESET}  ${DIM}Waiting for charger… %ds elapsed${pct:+  battery: ${pct}}${RESET}      " "$elapsed"
+    else
+      # Non-TTY: emit a status line every 30 seconds so callers have
+      # something to watch.
+      if (( elapsed % 30 == 0 )); then
+        echo "  … still waiting for charger (${elapsed}s elapsed${pct:+, battery ${pct}})"
+      fi
+    fi
+    tick=$(( (tick + 1) % ${#frames[@]} ))
+    sleep 2
+  done
+
+  # Clear the spinner line.
+  [[ "$USE_SPINNER" == true ]] && printf "\r%-72s\r" " "
+
+  pct="$(get_battery_percent)"
+  print_ok "External power detected${pct:+ (battery: ${pct})} — resuming."
+  log_event "POWER_GATE_RELEASED battery_pct=${pct:-unknown}"
+  echo ""
+}
+
 # ── Self-update check ─────────────────────────────────────────
 # Compares the running script's sha256 to the remote canonical script.
 # Rate-limited to once per UPDATE_CACHE_TTL_SECS (default 24h) via a
@@ -1247,6 +1338,7 @@ while [[ $# -gt 0 ]]; do
       rm -f "$UPDATE_CACHE_DIR/last-update-check" 2>/dev/null || true
       shift ;;
     --no-auto-caffeinate) NO_AUTO_CAFFEINATE=true; shift ;;
+    --allow-battery)      ALLOW_BATTERY=true;     shift ;;
     --help|-h)
       echo ""
       echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
@@ -1270,6 +1362,7 @@ while [[ $# -gt 0 ]]; do
       echo -e "    --skip-update-check   Don't check for a newer version on startup"
       echo -e "    --check-update        Force update check now (bypass 24h cache)"
       echo -e "    --no-auto-caffeinate  Don't auto-start caffeinate -dim if missing"
+      echo -e "    --allow-battery       Proceed even if the Mac is on battery (default: wait for AC)"
       echo ""
       echo -e "  ${DIM}Output options:${RESET}"
       echo -e "    --brief, -b           Show only the verdict in preflight output"
@@ -1386,12 +1479,18 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
   exit 0
 fi
 
+# ── Power-state gate ──────────────────────────────────────────
+# Must be the FIRST check on the actionable path — we don't want to
+# burn battery downloading updates or waiting for Claude when the
+# machine is unplugged. Desktop Macs (no battery) pass through.
+print_header
+wait_for_ac_power
+
 # ── Self-update check ─────────────────────────────────────────
 # Runs on the actionable path (default watch-and-sleep, --dry-run,
 # --caffeinate-only, --wait-for-start). Skipped for pure introspection
 # modes (--help/--list/--preflight) which returned above. Rate-limited
 # to once per 24h via ~/.cache/sleep-after-claude/last-update-check.
-print_header
 check_for_update
 
 # ── Detect Claude PID ─────────────────────────────────────────
