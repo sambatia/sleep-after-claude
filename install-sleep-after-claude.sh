@@ -368,15 +368,32 @@ print_done() {
 
 # ── gum / glow integration ────────────────────────────────────
 # These are optional polish layers. When `gum` (charmbracelet/gum) is
-# on PATH and stdout is a TTY, interactive prompts and styled cards
-# use gum for a prettier experience. When absent, everything falls
-# back to the hand-rolled bash UI. Users can force the fallback with
-# SAC_NO_GUM=1 (e.g. for CI, scripts, or minimal terminals).
+# on PATH and both stdin and stdout are real TTYs, interactive prompts
+# and styled cards use gum for a prettier experience. When absent —
+# or when the session is over SSH, where mobile/flaky SSH clients
+# mishandle gum's /dev/tty writes and arrow-key forwarding —
+# everything falls back to the hand-rolled bash UI.
+#
+# Overrides:
+#   SAC_NO_GUM=1      force fallback (CI, scripts, minimal terminals)
+#   SAC_FORCE_GUM=1   opt back in when over SSH (for users whose SSH
+#                     client handles TUIs well — e.g. iTerm → ssh)
 have_gum() {
-  [[ "${SAC_NO_GUM:-}" != "1" ]] && [[ "$STDOUT_IS_TTY" == true ]] && command -v gum >/dev/null 2>&1
+  [[ "${SAC_NO_GUM:-}" != "1" ]] || return 1
+  [[ "$STDOUT_IS_TTY" == true ]] || return 1
+  [[ "$STDIN_IS_TTY" == true ]] || return 1
+  # SSH sessions default to fallback — interactive TUIs over SSH are
+  # often fragile (especially over mobile SSH apps like Termius/Blink
+  # which may not forward arrow keys or /dev/tty reliably).
+  if [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]] && [[ "${SAC_FORCE_GUM:-}" != "1" ]]; then
+    return 1
+  fi
+  command -v gum >/dev/null 2>&1
 }
 have_glow() {
-  [[ "${SAC_NO_GLOW:-}" != "1" ]] && [[ "$STDOUT_IS_TTY" == true ]] && command -v glow >/dev/null 2>&1
+  [[ "${SAC_NO_GLOW:-}" != "1" ]] || return 1
+  [[ "$STDOUT_IS_TTY" == true ]] || return 1
+  command -v glow >/dev/null 2>&1
 }
 
 # Styled panel: gum-powered rounded box with colored border if gum is
@@ -883,8 +900,18 @@ render_preflight() {
   echo -e "  ${BOLD}Claude processes${RESET}"
   echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
   if [[ -n "$PREFLIGHT_TARGET" ]]; then
+    # Label the first match as the active "Target" (what the watch
+    # loop will actually follow) and any additional matches as
+    # "Candidate" so the output isn't misleading when there are
+    # multiple Claude processes running.
+    local _preflight_line_no=0
     echo "$PREFLIGHT_TARGET" | while IFS= read -r line; do
-      echo -e "  ${GREEN}✔${RESET} Target:    ${line}"
+      _preflight_line_no=$((_preflight_line_no + 1))
+      if [[ $_preflight_line_no -eq 1 ]]; then
+        echo -e "  ${GREEN}✔${RESET} Target:    ${line}"
+      else
+        echo -e "  ${DIM}•${RESET} Candidate: ${DIM}${line}  (not watched — use --pid to pick)${RESET}"
+      fi
     done
   else
     echo -e "  ${RED}✖${RESET} No target Claude process found"
