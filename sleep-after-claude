@@ -33,15 +33,20 @@ STDOUT_IS_TTY=false
 
 # ── Colours (disabled for non-TTY output) ─────────────────────
 if [[ "$STDOUT_IS_TTY" == true ]]; then
-  RESET="\033[0m"
-  BOLD="\033[1m"
-  DIM="\033[2m"
-  GREEN="\033[32m"
-  YELLOW="\033[33m"
-  CYAN="\033[36m"
-  RED="\033[31m"
-  BLUE="\033[34m"
-  MAGENTA="\033[35m"
+  # Use $'...' so the vars contain actual ESC bytes (not the literal
+  # string "\033[..."). This means `printf "%s" "$CYAN"` renders
+  # correctly, and `echo "$CYAN"` works without `-e`. The previous
+  # "\033[..." form required either `echo -e` or `printf %b`, and
+  # silently produced literal text when passed through `printf %s`.
+  RESET=$'\033[0m'
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  CYAN=$'\033[36m'
+  RED=$'\033[31m'
+  BLUE=$'\033[34m'
+  MAGENTA=$'\033[35m'
 else
   RESET=""
   BOLD=""
