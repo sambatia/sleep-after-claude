@@ -22,8 +22,9 @@ setup_sandbox() {
 #
 # Usage: shim pmset 'printf "%s\n" "failing"; exit 1'
 shim() {
-  local name="$1"; shift
-  cat > "$SHIM_DIR/$name" <<EOF
+  local name="$1"
+  shift
+  cat >"$SHIM_DIR/$name" <<EOF
 #!/usr/bin/env bash
 $*
 EOF
@@ -40,7 +41,7 @@ shim_fixture() {
     echo "fixture missing: $fixture_path" >&2
     return 1
   fi
-  cat > "$SHIM_DIR/$name" <<EOF
+  cat >"$SHIM_DIR/$name" <<EOF
 #!/usr/bin/env bash
 cat "$fixture_path"
 exit 0

@@ -457,7 +457,8 @@ goodnight/
 | `sleep-after-claude` | The actual tool users run. ~1050 lines of Bash. |
 | `install-sleep-after-claude.sh` | The installer users `curl | bash`. Embeds a byte-identical copy of `sleep-after-claude` between marker lines. |
 | `scripts/check-parity.sh` | Extracts the embedded payload and diffs it against the standalone. Exits 0 on match, non-zero with diff on drift. |
-| `.githooks/pre-commit` | Enables parity enforcement at commit time. Activate with `git config core.hooksPath .githooks`. |
+| `.githooks/pre-commit` | Legacy parity-only hook. Superseded by the `pre-commit` framework below. |
+| `.pre-commit-config.yaml` | Canonical pre-commit config. Enable with `pre-commit install`. Runs parity + shellcheck + shfmt + repo hygiene on every commit. |
 | `tests/*.bats` | bats-core test files. One file per risk area. Each test's name references the audit finding it protects. |
 | `tests/lib/common.bash` | Shared helpers: `setup_sandbox`, `shim`, `shim_fixture`, `assert_contains`. |
 | `tests/fixtures/pmset-assertions-*.txt` | Real captured output from `pmset -g assertions`. Used to feed shimmed `pmset` binaries in tests. |
@@ -650,16 +651,20 @@ Open an issue labeled `enhancement` describing:
 4. Run `bash scripts/check-parity.sh` — must pass.
 5. Add or update a test in `tests/*.bats` for any behavior change.
 6. Run `bats tests/` — must pass.
-7. Enable the pre-commit hook once per clone:
+7. Install the pre-commit suite once per clone (parity + shellcheck + shfmt + hygiene):
    ```bash
-   git config core.hooksPath .githooks
+   brew install shellcheck shfmt bats-core pre-commit
+   pre-commit install
    ```
+   All subsequent `git commit` invocations will auto-lint.
 8. Commit with a descriptive message.
 9. Open the PR against `main`.
 
 ### Code style
 
 - Bash, `set -uo pipefail` (not `-e` — by design).
+- Formatted with `shfmt -i 2 -ci`.
+- Linted with `shellcheck -S warning`. Intentional suppressions must include a reason.
 - All user-facing output goes through the `print_*` helpers.
 - Section banners (`# ── Section ──`) to navigate long scripts.
 - No tabs.

@@ -17,7 +17,7 @@ embedded="$(mktemp)"
 trap 'rm -f "$embedded"' EXIT
 
 awk '/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag' \
-  install-sleep-after-claude.sh > "$embedded"
+  install-sleep-after-claude.sh >"$embedded"
 
 if [[ ! -s "$embedded" ]]; then
   echo "check-parity: could not extract embedded payload (missing markers?)" >&2

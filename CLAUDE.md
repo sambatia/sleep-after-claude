@@ -25,7 +25,19 @@ Enforcement:
 bash scripts/check-parity.sh
 ```
 
-Exits 0 when identical, non-zero with a diff excerpt on drift. The pre-commit hook at `.githooks/pre-commit` runs this automatically when either file is staged; enable it once per clone with `git config core.hooksPath .githooks`.
+Exits 0 when identical, non-zero with a diff excerpt on drift.
+
+The preferred way to enforce this (and every other lint) is the
+`pre-commit` framework — install once per clone:
+
+```bash
+pre-commit install
+```
+
+This wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit` and
+runs parity + shellcheck + shfmt + hygiene hooks on every commit. A
+standalone legacy hook at `.githooks/pre-commit` still exists for
+users who prefer `git config core.hooksPath .githooks`.
 
 Regression test: `tests/parity.bats` (3 cases — passes on tree, fails on induced drift, fails on missing markers).
 
@@ -105,6 +117,20 @@ When modifying behavior, identify which section owns the concern; most flags tou
 - Integer validation uses `is_integer` / `is_positive_integer`; reuse rather than inlining regex.
 - `--json` output is consumed by automation; any new preflight field must be added to the JSON emitter **and** the human-readable renderer **and** the JSON-shape assertions in `tests/preflight-fail-closed.bats`.
 - `log_event` writes to `$LOG_FILE` only when `--log` is set. It warns to stderr **once per session** on first write failure (brace-grouped `{ echo ...; } 2>/dev/null` so bash's own redirection error is also suppressed). Subsequent failures stay silent to avoid spamming the watch loop.
+
+### Formatting / linting
+
+All shell scripts are formatted with `shfmt -i 2 -ci` and linted with `shellcheck -S warning`. Both run automatically via the `pre-commit` framework (`.pre-commit-config.yaml`). Run manually:
+
+```bash
+shfmt -w -i 2 -ci sleep-after-claude install-sleep-after-claude.sh scripts/*.sh .githooks/pre-commit tests/lib/common.bash
+shellcheck -S warning sleep-after-claude install-sleep-after-claude.sh scripts/*.sh .githooks/pre-commit tests/lib/common.bash
+pre-commit run --all-files
+```
+
+Intentional shellcheck suppressions live next to the code via `# shellcheck disable=SCxxxx` with a reason. Don't add suppressions without a reason.
+
+For editor experience, `bash-language-server` gives real-time shellcheck diagnostics and cross-file symbol navigation — install it as your editor's LSP for bash.
 
 ## Installer conventions
 

@@ -20,17 +20,29 @@ set -uo pipefail
 
 # ── Colours (TTY only) ────────────────────────────────────────────
 if [[ -t 1 ]]; then
-  C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
-  C_GREEN="\033[32m"; C_YELLOW="\033[33m"; C_CYAN="\033[36m"
-  C_RED="\033[31m"; C_BLUE="\033[34m"
+  C_RESET="\033[0m"
+  C_BOLD="\033[1m"
+  C_DIM="\033[2m"
+  C_GREEN="\033[32m"
+  C_YELLOW="\033[33m"
+  C_CYAN="\033[36m"
+  C_RED="\033[31m"
+  C_BLUE="\033[34m"
 else
-  C_RESET=""; C_BOLD=""; C_DIM=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_RED=""; C_BLUE=""
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_CYAN=""
+  C_RED=""
+  C_BLUE=""
 fi
 
-say()   { echo -e "  ${C_CYAN}›${C_RESET} $1"; }
-ok()    { echo -e "  ${C_GREEN}✔${C_RESET} $1"; }
-warn()  { echo -e "  ${C_YELLOW}⚠${C_RESET}  $1"; }
-fail()  { echo -e "  ${C_RED}✖${C_RESET} $1" >&2; }
+say() { echo -e "  ${C_CYAN}›${C_RESET} $1"; }
+ok() { echo -e "  ${C_GREEN}✔${C_RESET} $1"; }
+warn() { echo -e "  ${C_YELLOW}⚠${C_RESET}  $1"; }
+fail() { echo -e "  ${C_RED}✖${C_RESET} $1" >&2; }
 
 # ── Header ────────────────────────────────────────────────────────
 echo ""
@@ -50,6 +62,7 @@ if [[ ! -d "$HOME/bin" ]]; then
   mkdir -p "$HOME/bin"
   say "Created ~/bin"
 fi
+# shellcheck disable=SC2088 # Intentional user-facing display — "~/bin" reads better than an expanded absolute path
 ok "~/bin ready"
 
 # ── 3. ~/bin PATH handling — deferred until we know the rc file ──
@@ -91,8 +104,8 @@ if [[ ! -f "$SELF" ]]; then
   # Sanity-check the downloaded payload before trusting it.
   # 1. Size must be within a plausible envelope (guards against HTML error
   #    pages, truncated CDN responses, and absurd payloads).
-  TMP_SIZE="$(wc -c < "$TMP_SELF" | tr -d ' ')"
-  if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || (( TMP_SIZE < 2000 || TMP_SIZE > 524288 )); then
+  TMP_SIZE="$(wc -c <"$TMP_SELF" | tr -d ' ')"
+  if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || ((TMP_SIZE < 2000 || TMP_SIZE > 524288)); then
     fail "Downloaded installer has implausible size (${TMP_SIZE} bytes) — aborting."
     rm -f "$TMP_SELF"
     exit 1
@@ -122,7 +135,7 @@ if [[ ! -f "$SELF" ]]; then
   SELF="$TMP_SELF"
 fi
 
-awk '/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag' "$SELF" > "$TARGET"
+awk '/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag' "$SELF" >"$TARGET"
 
 [[ -n "$TMP_SELF" ]] && rm -f "$TMP_SELF"
 
@@ -132,7 +145,7 @@ if [[ ! -s "$TARGET" ]]; then
 fi
 
 chmod +x "$TARGET"
-ok "Extracted $(wc -l < "$TARGET" | tr -d ' ') lines to ~/bin/sleep-after-claude"
+ok "Extracted $(wc -l <"$TARGET" | tr -d ' ') lines to ~/bin/sleep-after-claude"
 
 # ── 6. Syntax-check the extracted script ──────────────────────────
 if bash -n "$TARGET" 2>/dev/null; then
@@ -176,7 +189,7 @@ else
       skip_next_if_alias==1 && /^[[:space:]]*alias[[:space:]]+goodnight=/ { skip_next_if_alias=0; next }
       /^[[:space:]]*alias[[:space:]]+goodnight=/ { skip_next_if_alias=0; next }
       { skip_next_if_alias=0; print }
-    ' "$RC" > "$TMP_RC" && mv "$TMP_RC" "$RC"
+    ' "$RC" >"$TMP_RC" && mv "$TMP_RC" "$RC"
     say "Removed existing 'goodnight' alias line(s) in $(basename "$RC")"
   fi
 
@@ -184,7 +197,7 @@ else
     echo ''
     echo '# sleep-after-claude shortcut (added by installer)'
     echo "alias goodnight=\"$HOME/bin/sleep-after-claude\""
-  } >> "$RC"
+  } >>"$RC"
   ok "Alias 'goodnight' added to $(basename "$RC")"
 
   # Ensure ~/bin is on PATH for future shell sessions. Dedupe the same
@@ -196,15 +209,16 @@ else
     # Also detect near-equivalents (e.g. quoted differently) so we
     # don't append a second PATH line that contradicts a prior manual
     # edit.
-    if grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*\$HOME/bin' "$RC" 2>/dev/null \
-       || grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*'"$HOME/bin" "$RC" 2>/dev/null; then
+    if grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*\$HOME/bin' "$RC" 2>/dev/null ||
+      grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*'"$HOME/bin" "$RC" 2>/dev/null; then
       : # some PATH export mentioning $HOME/bin already exists
     else
       {
         echo ''
         echo '# Put ~/bin on PATH so sleep-after-claude is callable directly (added by installer)'
         echo "$PATH_LINE"
-      } >> "$RC"
+      } >>"$RC"
+      # shellcheck disable=SC2088 # Intentional user-facing display
       ok "~/bin added to PATH in $(basename "$RC")"
     fi
   fi
@@ -289,7 +303,15 @@ if [[ "$STDOUT_IS_TTY" == true ]]; then
   BLUE="\033[34m"
   MAGENTA="\033[35m"
 else
-  RESET=""; BOLD=""; DIM=""; GREEN=""; YELLOW=""; CYAN=""; RED=""; BLUE=""; MAGENTA=""
+  RESET=""
+  BOLD=""
+  DIM=""
+  GREEN=""
+  YELLOW=""
+  CYAN=""
+  RED=""
+  BLUE=""
+  MAGENTA=""
 fi
 
 # ── Config defaults ───────────────────────────────────────────
@@ -317,7 +339,7 @@ ALLOW_BATTERY=false
 UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
 UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
 UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
-UPDATE_CACHE_TTL_SECS=86400  # 24h rate-limit on network checks
+UPDATE_CACHE_TTL_SECS=86400 # 24h rate-limit on network checks
 
 # ── Helpers ───────────────────────────────────────────────────
 print_header() {
@@ -326,27 +348,34 @@ print_header() {
   echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
 }
 
-print_step()  { echo -e "  ${CYAN}›${RESET} $1"; }
-print_ok()    { echo -e "  ${GREEN}✔${RESET} $1"; }
-print_warn()  { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
+print_step() { echo -e "  ${CYAN}›${RESET} $1"; }
+print_ok() { echo -e "  ${GREEN}✔${RESET} $1"; }
+print_warn() { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
 print_error() { echo -e "  ${RED}✖${RESET} $1"; }
-print_done()  { echo ""; echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"; echo ""; }
+print_done() {
+  echo ""
+  echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"
+  echo ""
+}
 
 clear_line() {
   [[ "$USE_SPINNER" == true ]] && printf "\r%-72s\r" " "
 }
 
-is_integer()          { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 
 elapsed_label() {
   local secs=$1
-  local h=$(( secs / 3600 ))
-  local m=$(( (secs % 3600) / 60 ))
-  local s=$(( secs % 60 ))
-  if   [[ $h -gt 0 ]]; then printf "%dh %02dm %02ds" $h $m $s
-  elif [[ $m -gt 0 ]]; then printf "%dm %02ds" $m $s
-  else                      printf "%ds" $s
+  local h=$((secs / 3600))
+  local m=$(((secs % 3600) / 60))
+  local s=$((secs % 60))
+  if [[ $h -gt 0 ]]; then
+    printf "%dh %02dm %02ds" $h $m $s
+  elif [[ $m -gt 0 ]]; then
+    printf "%dm %02ds" $m $s
+  else
+    printf "%ds" $s
   fi
 }
 
@@ -394,7 +423,7 @@ log_event() {
   # Brace group + outer 2>/dev/null so the shell's own "No such file or
   # directory" error on a failed >> redirection is also suppressed, not
   # just errors produced by the command itself.
-  if ! { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; } 2>/dev/null; then
+  if ! { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >>"$LOG_FILE"; } 2>/dev/null; then
     # Warn once per session so the user knows durability is broken.
     if [[ "$LOG_WRITE_FAILED" == false ]]; then
       LOG_WRITE_FAILED=true
@@ -422,42 +451,43 @@ find_claude_processes() {
   script_name="$(basename "$0")"
 
   tight_pids=$(
-    { pgrep -x claude 2>/dev/null || true
+    {
+      pgrep -x claude 2>/dev/null || true
       pgrep -f "claude-code" 2>/dev/null || true
     } | sort -u | grep -v "^$$\$" || true
   )
 
   if [[ -n "$tight_pids" ]]; then
-    tight_result=$(echo "$tight_pids" \
-      | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
-      | grep -iv "$script_name" \
-      | grep -iv "sleep-after" \
-      | grep -Ev "$EXCLUDE_PATTERN" \
-      || true)
+    tight_result=$(echo "$tight_pids" |
+      xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' |
+      grep -iv "$script_name" |
+      grep -iv "sleep-after" |
+      grep -Ev "$EXCLUDE_PATTERN" ||
+      true)
     if [[ -n "$tight_result" ]]; then
       echo "$tight_result"
       return
     fi
   fi
 
-  pgrep -fi "claude" 2>/dev/null \
-    | grep -v "^$$\$" \
-    | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
-    | grep -iv "$script_name" \
-    | grep -iv "sleep-after" \
-    | grep -Ev "$EXCLUDE_PATTERN" \
-    || true
+  pgrep -fi "claude" 2>/dev/null |
+    grep -v "^$$\$" |
+    xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' |
+    grep -iv "$script_name" |
+    grep -iv "sleep-after" |
+    grep -Ev "$EXCLUDE_PATTERN" ||
+    true
 }
 
 find_all_claude_processes_raw() {
   local script_name
   script_name="$(basename "$0")"
-  pgrep -fi "claude" 2>/dev/null \
-    | grep -v "^$$\$" \
-    | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
-    | grep -iv "$script_name" \
-    | grep -iv "sleep-after" \
-    || true
+  pgrep -fi "claude" 2>/dev/null |
+    grep -v "^$$\$" |
+    xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' |
+    grep -iv "$script_name" |
+    grep -iv "sleep-after" ||
+    true
 }
 
 # ── Pre-flight scan ───────────────────────────────────────────
@@ -517,7 +547,7 @@ scan_assertions() {
       continue
     fi
     [[ "$parsing" == false ]] && continue
-    [[ -z "${line// }" ]] && continue
+    [[ -z "${line// /}" ]] && continue
 
     if [[ "$line" =~ pid[[:space:]]+([0-9]+)\(([^\)]+)\).*\][[:space:]]+[^[:space:]]+[[:space:]]+([A-Za-z]+) ]]; then
       apid="${BASH_REMATCH[1]}"
@@ -544,18 +574,20 @@ scan_assertions() {
             severity="blocker"
           fi
           ;;
-        PreventUserIdleDisplaySleep|NoDisplaySleepAssertion)
-          severity="display" ;;
+        PreventUserIdleDisplaySleep | NoDisplaySleepAssertion)
+          severity="display"
+          ;;
         UserIsActive)
-          severity="user" ;;
+          severity="user"
+          ;;
       esac
 
       PREFLIGHT_ASSERTIONS+=("$severity|$apid|$aname|$atype")
       [[ "$severity" == "blocker" ]] && PREFLIGHT_BLOCKERS+=("$apid|$aname|$atype")
       [[ "$severity" == "display" ]] && PREFLIGHT_DISPLAY_ONLY+=("$apid|$aname|$atype")
-      [[ "$severity" == "system" ]]  && PREFLIGHT_SYSTEM+=("$apid|$aname|$atype")
+      [[ "$severity" == "system" ]] && PREFLIGHT_SYSTEM+=("$apid|$aname|$atype")
     fi
-  done <<< "$raw"
+  done <<<"$raw"
 }
 
 preflight_scan() {
@@ -586,15 +618,15 @@ preflight_scan() {
       if ! echo "$target_pid_set" | grep -qx "$pid"; then
         PREFLIGHT_EXCLUDED+="${line}"$'\n'
       fi
-    done <<< "$all_claude"
+    done <<<"$all_claude"
     PREFLIGHT_EXCLUDED="${PREFLIGHT_EXCLUDED%$'\n'}"
   fi
 
   # -- Caffeinate detail
   PREFLIGHT_CAFFEINATE="$(
-    ps -axo pid=,user=,etime=,command= 2>/dev/null \
-      | awk '/[c]affeinate/' \
-      || true
+    ps -axo pid=,user=,etime=,command= 2>/dev/null |
+      awk '/[c]affeinate/' ||
+      true
   )"
 
   # -- Assertions
@@ -625,10 +657,10 @@ preflight_scan() {
 
   # -- Lid state
   PREFLIGHT_LID="$(
-    ioreg -r -k AppleClamshellState 2>/dev/null \
-      | awk -F'= ' '/AppleClamshellState/ {print $2; exit}' \
-      | tr -d ' ' \
-      || echo "unknown"
+    ioreg -r -k AppleClamshellState 2>/dev/null |
+      awk -F'= ' '/AppleClamshellState/ {print $2; exit}' |
+      tr -d ' ' ||
+      echo "unknown"
   )"
   [[ -z "$PREFLIGHT_LID" ]] && PREFLIGHT_LID="unknown"
 
@@ -655,7 +687,7 @@ render_preflight_brief() {
     echo -e "  ${RED}✖${RESET} ${#PREFLIGHT_BLOCKERS[@]} sleep blocker(s):"
     local entry pid name type
     for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-      IFS='|' read -r pid name type <<< "$entry"
+      IFS='|' read -r pid name type <<<"$entry"
       echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${RED}${type}${RESET}"
     done
   fi
@@ -711,7 +743,7 @@ render_preflight() {
   else
     local entry sev pid name type
     for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
-      IFS='|' read -r sev pid name type <<< "$entry"
+      IFS='|' read -r sev pid name type <<<"$entry"
       case "$sev" in
         blocker)
           echo -e "  ${RED}✖${RESET} ${BOLD}${name}${RESET} (PID $pid): ${RED}${type}${RESET} ${DIM}← BLOCKS SYSTEM SLEEP${RESET}"
@@ -745,7 +777,7 @@ render_preflight() {
   local lid_display="unknown"
   case "$PREFLIGHT_LID" in
     Yes) lid_display="closed" ;;
-    No)  lid_display="open" ;;
+    No) lid_display="open" ;;
   esac
   echo -e "  ${DIM}Lid:            ${RESET}${lid_display}"
 
@@ -788,7 +820,7 @@ render_preflight() {
     echo ""
     local entry pid name type
     for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-      IFS='|' read -r pid name type <<< "$entry"
+      IFS='|' read -r pid name type <<<"$entry"
       echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${RED}${type}${RESET}"
     done
     echo ""
@@ -827,7 +859,7 @@ render_preflight_json() {
       ecmd="$(echo "$line" | awk '{$1=""; sub(/^ /,""); print}')"
       [[ "$first" == true ]] && first=false || printf ','
       printf '\n    {"pid": %s, "command": "%s"}' "$epid" "$(json_escape "$ecmd")"
-    done <<< "$PREFLIGHT_EXCLUDED"
+    done <<<"$PREFLIGHT_EXCLUDED"
     printf '\n  '
   fi
   printf '],\n'
@@ -841,7 +873,7 @@ render_preflight_json() {
     while IFS= read -r pid; do
       [[ "$first" == true ]] && first=false || printf ', '
       printf '%s' "$pid"
-    done <<< "$caff_pids"
+    done <<<"$caff_pids"
   fi
   printf '],\n'
 
@@ -849,7 +881,7 @@ render_preflight_json() {
   printf '  "assertions": ['
   first=true
   for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
-    IFS='|' read -r sev pid name type <<< "$entry"
+    IFS='|' read -r sev pid name type <<<"$entry"
     [[ "$first" == true ]] && first=false || printf ','
     printf '\n    {"severity": "%s", "pid": %s, "name": "%s", "type": "%s"}' \
       "$sev" "$pid" "$(json_escape "$name")" "$(json_escape "$type")"
@@ -861,7 +893,7 @@ render_preflight_json() {
   printf '  "blockers": ['
   first=true
   for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-    IFS='|' read -r pid name type <<< "$entry"
+    IFS='|' read -r pid name type <<<"$entry"
     [[ "$first" == true ]] && first=false || printf ','
     printf '\n    {"pid": %s, "name": "%s", "type": "%s"}' \
       "$pid" "$(json_escape "$name")" "$(json_escape "$type")"
@@ -874,12 +906,12 @@ render_preflight_json() {
   case "$PREFLIGHT_LID" in Yes) lid_display="closed" ;; No) lid_display="open" ;; esac
 
   printf '  "power": {\n'
-  printf '    "battery_percent": "%s",\n'   "$(json_escape "$PREFLIGHT_BATTERY_PCT")"
-  printf '    "battery_source": "%s",\n'    "$(json_escape "$PREFLIGHT_BATTERY_SRC")"
-  printf '    "system_sleep_min": "%s",\n'  "$(json_escape "${PREFLIGHT_SLEEP_MIN:-?}")"
+  printf '    "battery_percent": "%s",\n' "$(json_escape "$PREFLIGHT_BATTERY_PCT")"
+  printf '    "battery_source": "%s",\n' "$(json_escape "$PREFLIGHT_BATTERY_SRC")"
+  printf '    "system_sleep_min": "%s",\n' "$(json_escape "${PREFLIGHT_SLEEP_MIN:-?}")"
   printf '    "display_sleep_min": "%s",\n' "$(json_escape "${PREFLIGHT_DISPLAYSLEEP_MIN:-?}")"
-  printf '    "hibernate_mode": "%s",\n'    "$(json_escape "${PREFLIGHT_HIBERNATE_MODE:-?}")"
-  printf '    "lid": "%s"\n'                "$(json_escape "$lid_display")"
+  printf '    "hibernate_mode": "%s",\n' "$(json_escape "${PREFLIGHT_HIBERNATE_MODE:-?}")"
+  printf '    "lid": "%s"\n' "$(json_escape "$lid_display")"
   printf '  },\n'
   printf '  "scan_ok": %s,\n' "$([[ "$PREFLIGHT_SCAN_OK" == true ]] && echo true || echo false)"
   # can_sleep: true only when scan succeeded AND no blockers. Null when the
@@ -899,7 +931,7 @@ prompt_confirm() {
   printf "  %b " "$prompt"
   read -r response
   case "$response" in
-    [yY]|[yY][eE][sS]) return 0 ;;
+    [yY] | [yY][eE][sS]) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -910,7 +942,7 @@ print_post_watch_blockers() {
   echo ""
   print_warn "${#PREFLIGHT_BLOCKERS[@]} sleep blocker(s) detected AFTER watch finished:"
   for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-    IFS='|' read -r pid name type <<< "$entry"
+    IFS='|' read -r pid name type <<<"$entry"
     echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${type}"
   done
   print_step "Sleep may not succeed. Releasing caffeinate anyway."
@@ -944,9 +976,9 @@ system_blocker_hint() {
   case "$name" in
     cameracaptured) echo "Camera is in use — quit Zoom/Meet/FaceTime/Chrome tabs/Continuity Camera." ;;
     mediaanalysisd) echo "Photos is analyzing media — will release on its own shortly." ;;
-    screencaptureui|replayd) echo "Screen recording is active — stop the recording." ;;
+    screencaptureui | replayd) echo "Screen recording is active — stop the recording." ;;
     avconferenced) echo "A call/conference app is active — end the call." ;;
-    *)               echo "System-managed — quit the app that triggered this assertion." ;;
+    *) echo "System-managed — quit the app that triggered this assertion." ;;
   esac
 }
 
@@ -958,7 +990,7 @@ prompt_and_handle_blockers() {
   local user_blockers=() system_blockers=()
 
   for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-    IFS='|' read -r pid name type <<< "$entry"
+    IFS='|' read -r pid name type <<<"$entry"
     kind="$(classify_blocker "$name")"
     if [[ "$kind" == "system" ]]; then
       system_blockers+=("$entry")
@@ -973,7 +1005,7 @@ prompt_and_handle_blockers() {
   if [[ ${#user_blockers[@]} -gt 0 ]]; then
     echo -e "  ${BOLD}User apps${RESET} ${DIM}(can be terminated):${RESET}"
     for entry in "${user_blockers[@]}"; do
-      IFS='|' read -r pid name type <<< "$entry"
+      IFS='|' read -r pid name type <<<"$entry"
       echo -e "    ${RED}✖${RESET} ${BOLD}${name}${RESET} (PID $pid) — ${type}"
     done
     echo ""
@@ -981,7 +1013,7 @@ prompt_and_handle_blockers() {
   if [[ ${#system_blockers[@]} -gt 0 ]]; then
     echo -e "  ${BOLD}System-managed${RESET} ${DIM}(cannot be killed — requires your action):${RESET}"
     for entry in "${system_blockers[@]}"; do
-      IFS='|' read -r pid name type <<< "$entry"
+      IFS='|' read -r pid name type <<<"$entry"
       echo -e "    ${YELLOW}⚠${RESET}  ${BOLD}${name}${RESET} (PID $pid) — ${type}"
       echo -e "       ${DIM}→ $(system_blocker_hint "$name")${RESET}"
     done
@@ -995,7 +1027,7 @@ prompt_and_handle_blockers() {
 
   if [[ "$STDIN_IS_TTY" != true ]]; then
     print_error "Sleep blockers detected and stdin is not a TTY for confirmation."
-    print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+    print_step "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
     return 1
   fi
 
@@ -1014,7 +1046,7 @@ prompt_and_handle_blockers() {
   read -r choice
   choice="$(echo "$choice" | tr '[:upper:]' '[:lower:]')"
   case "$choice" in
-    t|terminate)
+    t | terminate)
       if [[ ${#user_blockers[@]} -eq 0 ]]; then
         print_warn "No user-killable blockers — only system-managed ones remain. Skipping terminate."
         return 0
@@ -1027,18 +1059,18 @@ prompt_and_handle_blockers() {
       else
         print_warn "${#PREFLIGHT_BLOCKERS[@]} blocker(s) remain after termination (likely system-managed):"
         for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
-          IFS='|' read -r pid name type <<< "$entry"
+          IFS='|' read -r pid name type <<<"$entry"
           echo -e "    ${YELLOW}⚠${RESET}  ${name} (PID $pid) — ${type}"
         done
         print_step "Proceeding with watch anyway."
       fi
       return 0
       ;;
-    s|skip)
+    s | skip)
       print_warn "Skipping termination. Sleep may not succeed after Claude finishes."
       return 0
       ;;
-    a|abort|"")
+    a | abort | "")
       print_warn "Aborted. Claude is still running; caffeinate untouched."
       return 1
       ;;
@@ -1059,15 +1091,16 @@ terminate_user_blockers() {
   echo ""
   print_step "Terminating user-app blockers..."
   for entry in "$@"; do
-    IFS='|' read -r pid name type <<< "$entry"
+    IFS='|' read -r pid name type <<<"$entry"
     if ! kill -0 "$pid" 2>/dev/null; then
       stopped+=("$name (PID $pid, already gone)")
       continue
     fi
     if kill "$pid" 2>/dev/null; then
-      # Poll up to 2 seconds for graceful exit.
-      local i
-      for i in 1 2 3 4 5 6 7 8 9 10; do
+      # Poll up to 2 seconds for graceful exit. The loop variable is
+      # unused — we only care about the iteration count.
+      local _
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2
       done
@@ -1137,7 +1170,8 @@ get_power_source() {
   local batt
   batt="$(pmset -g batt 2>/dev/null)"
   if [[ -z "$batt" ]]; then
-    echo "Unknown"; return
+    echo "Unknown"
+    return
   fi
   if echo "$batt" | grep -q "'AC Power'"; then
     echo "AC"
@@ -1162,7 +1196,7 @@ get_battery_percent() {
 # Ctrl+C cleanly aborts via the existing on_interrupt trap.
 wait_for_ac_power() {
   [[ "$ALLOW_BATTERY" == true ]] && return 0
-  [[ "$FORCE" == true ]]         && return 0
+  [[ "$FORCE" == true ]] && return 0
 
   local src pct
   src="$(get_power_source)"
@@ -1194,18 +1228,18 @@ wait_for_ac_power() {
       break
     fi
     now_ts=$(date +%s)
-    elapsed=$(( now_ts - start_ts ))
+    elapsed=$((now_ts - start_ts))
     pct="$(get_battery_percent)"
     if [[ "$USE_SPINNER" == true ]]; then
       printf "\r  ${CYAN}${frames[$tick]}${RESET}  ${DIM}Waiting for charger… %ds elapsed${pct:+  battery: ${pct}}${RESET}      " "$elapsed"
     else
       # Non-TTY: emit a status line every 30 seconds so callers have
       # something to watch.
-      if (( elapsed % 30 == 0 )); then
+      if ((elapsed % 30 == 0)); then
         echo "  … still waiting for charger (${elapsed}s elapsed${pct:+, battery ${pct}})"
       fi
     fi
-    tick=$(( (tick + 1) % ${#frames[@]} ))
+    tick=$(((tick + 1) % ${#frames[@]}))
     sleep 2
   done
 
@@ -1226,8 +1260,8 @@ wait_for_ac_power() {
 # the check to be silently skipped so offline users aren't blocked.
 check_for_update() {
   [[ "$SKIP_UPDATE_CHECK" == true ]] && return 0
-  command -v curl >/dev/null 2>&1    || return 0
-  command -v shasum >/dev/null 2>&1  || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v shasum >/dev/null 2>&1 || return 0
 
   mkdir -p "$UPDATE_CACHE_DIR" 2>/dev/null || return 0
   local stamp="$UPDATE_CACHE_DIR/last-update-check"
@@ -1235,7 +1269,7 @@ check_for_update() {
     local last_ts now_ts
     last_ts="$(cat "$stamp" 2>/dev/null || echo 0)"
     now_ts="$(date +%s)"
-    if [[ "$last_ts" =~ ^[0-9]+$ ]] && (( now_ts - last_ts < UPDATE_CACHE_TTL_SECS )); then
+    if [[ "$last_ts" =~ ^[0-9]+$ ]] && ((now_ts - last_ts < UPDATE_CACHE_TTL_SECS)); then
       return 0
     fi
   fi
@@ -1256,13 +1290,16 @@ check_for_update() {
 
   local local_sha remote_sha self_path
   self_path="${BASH_SOURCE[0]:-$0}"
-  [[ -f "$self_path" ]] || { rm -f "$tmp_remote"; return 0; }
+  [[ -f "$self_path" ]] || {
+    rm -f "$tmp_remote"
+    return 0
+  }
   local_sha="$(shasum -a 256 "$self_path" 2>/dev/null | awk '{print $1}')"
   remote_sha="$(shasum -a 256 "$tmp_remote" 2>/dev/null | awk '{print $1}')"
   rm -f "$tmp_remote"
 
   # Record that we checked, regardless of result, to honor TTL.
-  date +%s > "$stamp" 2>/dev/null || true
+  date +%s >"$stamp" 2>/dev/null || true
 
   if [[ -z "$local_sha" || -z "$remote_sha" ]] || [[ "$local_sha" == "$remote_sha" ]]; then
     return 0
@@ -1295,51 +1332,107 @@ check_for_update() {
 # ── Argument parsing ──────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --timeout|-t)
+    --timeout | -t)
       if [[ -z "${2:-}" ]] || ! is_positive_integer "$2"; then
         echo -e "${RED}✖  --timeout requires a positive integer ≥ 1 (hours)${RESET}" >&2
         exit 1
       fi
-      TIMEOUT_HOURS="$2"; shift 2 ;;
-    --pid|-p)
+      TIMEOUT_HOURS="$2"
+      shift 2
+      ;;
+    --pid | -p)
       if [[ -z "${2:-}" ]] || ! is_integer "$2"; then
         echo -e "${RED}✖  --pid requires a numeric process ID${RESET}" >&2
         exit 1
       fi
-      TARGET_PID="$2"; TARGET_PID_EXPLICIT=true; shift 2 ;;
-    --delay|-d)
+      TARGET_PID="$2"
+      TARGET_PID_EXPLICIT=true
+      shift 2
+      ;;
+    --delay | -d)
       if [[ -z "${2:-}" ]] || ! is_integer "$2"; then
         echo -e "${RED}✖  --delay requires a non-negative integer (seconds)${RESET}" >&2
         exit 1
       fi
-      DELAY_SECS="$2"; shift 2 ;;
+      DELAY_SECS="$2"
+      shift 2
+      ;;
     --log-file)
       if [[ -z "${2:-}" ]]; then
         echo -e "${RED}✖  --log-file requires a path${RESET}" >&2
         exit 1
       fi
-      LOG_FILE="$2"; LOG_ENABLED=true; shift 2 ;;
-    --no-sound)          NO_SOUND=true;         shift ;;
-    --caffeinate-only)   CAFFEINATE_ONLY=true;  shift ;;
-    --dry-run)           DRY_RUN=true;          shift ;;
-    --list|-l)           LIST_MODE=true;        shift ;;
-    --notify|-n)         NOTIFY=true;           shift ;;
-    --log)               LOG_ENABLED=true;      shift ;;
-    --wait-for-start)    WAIT_FOR_START=true;   shift ;;
-    --preflight|-P)      PREFLIGHT_ONLY=true;   shift ;;
-    --no-preflight)      SKIP_PREFLIGHT=true;   shift ;;
-    --force|--yes|-f|-y) FORCE=true;            shift ;;
-    --brief|-b)          BRIEF=true;            shift ;;
-    --json)              JSON_OUTPUT=true;      shift ;;
-    --skip-update-check) SKIP_UPDATE_CHECK=true; shift ;;
+      LOG_FILE="$2"
+      LOG_ENABLED=true
+      shift 2
+      ;;
+    --no-sound)
+      NO_SOUND=true
+      shift
+      ;;
+    --caffeinate-only)
+      CAFFEINATE_ONLY=true
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --list | -l)
+      LIST_MODE=true
+      shift
+      ;;
+    --notify | -n)
+      NOTIFY=true
+      shift
+      ;;
+    --log)
+      LOG_ENABLED=true
+      shift
+      ;;
+    --wait-for-start)
+      WAIT_FOR_START=true
+      shift
+      ;;
+    --preflight | -P)
+      PREFLIGHT_ONLY=true
+      shift
+      ;;
+    --no-preflight)
+      SKIP_PREFLIGHT=true
+      shift
+      ;;
+    --force | --yes | -f | -y)
+      FORCE=true
+      shift
+      ;;
+    --brief | -b)
+      BRIEF=true
+      shift
+      ;;
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
+    --skip-update-check)
+      SKIP_UPDATE_CHECK=true
+      shift
+      ;;
     --check-update)
       # Force an immediate update check, bypassing the 24h rate-limit
       # cache, then continue with the normal flow.
       rm -f "$UPDATE_CACHE_DIR/last-update-check" 2>/dev/null || true
-      shift ;;
-    --no-auto-caffeinate) NO_AUTO_CAFFEINATE=true; shift ;;
-    --allow-battery)      ALLOW_BATTERY=true;     shift ;;
-    --help|-h)
+      shift
+      ;;
+    --no-auto-caffeinate)
+      NO_AUTO_CAFFEINATE=true
+      shift
+      ;;
+    --allow-battery)
+      ALLOW_BATTERY=true
+      shift
+      ;;
+    --help | -h)
       echo ""
       echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
       echo ""
@@ -1375,10 +1468,12 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo -e "  ${DIM}Default log:${RESET} ~/.local/state/sleep-after-claude.log"
       echo ""
-      exit 0 ;;
+      exit 0
+      ;;
     *)
       echo -e "${RED}✖  Unknown argument: $1${RESET}" >&2
-      exit 1 ;;
+      exit 1
+      ;;
   esac
 done
 
@@ -1436,7 +1531,7 @@ if [[ "$LIST_MODE" == true ]]; then
       if ! echo "$list_target_pids" | grep -qx "$pid"; then
         list_excluded+="${line}"$'\n'
       fi
-    done <<< "$list_all"
+    done <<<"$list_all"
     list_excluded="${list_excluded%$'\n'}"
   fi
 
@@ -1509,8 +1604,8 @@ if [[ -z "$TARGET_PID" ]]; then
 
   if [[ -z "$MATCHES" ]]; then
     print_error "No Claude process found. Is Claude Code running?"
-    print_step  "Run ${BOLD}sleep-after-claude --list${RESET} to check what's detectable."
-    print_step  "Or use ${BOLD}--wait-for-start${RESET} to wait for Claude to launch."
+    print_step "Run ${BOLD}sleep-after-claude --list${RESET} to check what's detectable."
+    print_step "Or use ${BOLD}--wait-for-start${RESET} to wait for Claude to launch."
     exit 1
   fi
 
@@ -1569,7 +1664,7 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
         echo ""
       else
         print_error "Sleep-blocker scan failed and stdin is not a TTY for confirmation."
-        print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+        print_step "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
         exit 1
       fi
     else
@@ -1598,9 +1693,9 @@ ensure_caffeinate_running
 # Captured AFTER ensure_caffeinate_running so any auto-started
 # caffeinate is included and will be released at the end of watch.
 # shellcheck disable=SC2207
-INITIAL_CAFF_PIDS=( $(pgrep caffeinate 2>/dev/null || true) )
+INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
 
-TIMEOUT_SECS=$(( TIMEOUT_HOURS * 3600 ))
+TIMEOUT_SECS=$((TIMEOUT_HOURS * 3600))
 
 echo -e "  ${BOLD}Starting watch${RESET}"
 echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
@@ -1612,11 +1707,11 @@ else
   print_warn "No caffeinate processes currently running"
 fi
 [[ "$CAFFEINATE_ONLY" == true ]] && print_step "Mode:     ${BOLD}caffeinate-only${RESET} (will not sleep the Mac)"
-[[ "$DRY_RUN" == true ]]         && print_step "Mode:     ${BOLD}dry-run${RESET} (will not sleep the Mac)"
-[[ "$NO_SOUND" == true ]]        && print_step "Sound:    ${BOLD}off${RESET}"
-[[ "$NOTIFY" == true ]]          && print_step "Notify:   ${BOLD}on${RESET}"
-[[ "$LOG_ENABLED" == true ]]     && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
-[[ "$USE_SPINNER" == false ]]    && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
+[[ "$DRY_RUN" == true ]] && print_step "Mode:     ${BOLD}dry-run${RESET} (will not sleep the Mac)"
+[[ "$NO_SOUND" == true ]] && print_step "Sound:    ${BOLD}off${RESET}"
+[[ "$NOTIFY" == true ]] && print_step "Notify:   ${BOLD}on${RESET}"
+[[ "$LOG_ENABLED" == true ]] && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
+[[ "$USE_SPINNER" == false ]] && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
 print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
 echo ""
 
@@ -1634,12 +1729,12 @@ TIMED_OUT=false
 PID_REUSED=false
 
 while kill -0 "$TARGET_PID" 2>/dev/null; do
-  if (( TICK_COUNT % 10 == 0 )); then
+  if ((TICK_COUNT % 10 == 0)); then
     NOW=$(date +%s)
-    ELAPSED=$(( NOW - START_TIME ))
+    ELAPSED=$((NOW - START_TIME))
   fi
 
-  if [[ -n "$TARGET_BIN" ]] && (( TICK_COUNT % 300 == 0 )) && (( TICK_COUNT > 0 )); then
+  if [[ -n "$TARGET_BIN" ]] && ((TICK_COUNT % 300 == 0)) && ((TICK_COUNT > 0)); then
     CURRENT_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
     CURRENT_BIN="$(echo "$CURRENT_CMD" | awk '{print $1}')"
     if [[ -n "$CURRENT_BIN" && "$CURRENT_BIN" != "$TARGET_BIN" ]]; then
@@ -1662,14 +1757,14 @@ while kill -0 "$TARGET_PID" 2>/dev/null; do
     printf "\r  ${CYAN}${FRAMES[$TICK]}${RESET}  ${DIM}Waiting for PID $TARGET_PID… %s elapsed${RESET}" \
       "$(elapsed_label $ELAPSED)"
   else
-    if (( ELAPSED - LAST_STATUS_LOG >= 300 )); then
+    if ((ELAPSED - LAST_STATUS_LOG >= 300)); then
       echo "  … still waiting for PID $TARGET_PID ($(elapsed_label $ELAPSED) elapsed)"
       LAST_STATUS_LOG=$ELAPSED
     fi
   fi
 
-  TICK=$(( (TICK + 1) % ${#FRAMES[@]} ))
-  TICK_COUNT=$(( TICK_COUNT + 1 ))
+  TICK=$(((TICK + 1) % ${#FRAMES[@]}))
+  TICK_COUNT=$((TICK_COUNT + 1))
   micro_sleep 0.1
 done
 
@@ -1677,7 +1772,7 @@ clear_line
 WATCH_STARTED=false
 
 if [[ "$TIMED_OUT" == false && "$PID_REUSED" == false ]]; then
-  TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
+  TOTAL_ELAPSED=$(($(date +%s) - START_TIME))
   print_ok "Process ${BOLD}PID $TARGET_PID${RESET} finished after $(elapsed_label $TOTAL_ELAPSED)"
   log_event "CLAUDE_FINISHED pid=$TARGET_PID elapsed=${TOTAL_ELAPSED}s"
   notify_macos "Claude finished after $(elapsed_label $TOTAL_ELAPSED)"
@@ -1764,8 +1859,8 @@ elif osascript -e 'tell application "System Events" to sleep' 2>/dev/null; then
   exit 0
 else
   print_error "Could not trigger sleep automatically."
-  print_warn  "Run manually: ${BOLD}pmset sleepnow${RESET}"
-  log_event   "SLEEP_FAILED"
+  print_warn "Run manually: ${BOLD}pmset sleepnow${RESET}"
+  log_event "SLEEP_FAILED"
   exit 1
 fi
 __SCRIPT_END__

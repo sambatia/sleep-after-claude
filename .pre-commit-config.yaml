@@ -1,0 +1,63 @@
+# Pre-commit hooks for goodnight / sleep-after-claude.
+#
+# Install once per clone:
+#   pre-commit install
+#
+# Run ad hoc against the full tree:
+#   pre-commit run --all-files
+#
+# Why these specific hooks:
+#   - check-parity:         ENFORCES the core invariant that the embedded
+#                           installer payload is byte-identical to the
+#                           standalone script. Runs first so a broken
+#                           payload fails fast.
+#   - shellcheck:           Catches shell-scripting bugs (unquoted vars,
+#                           misuse of test primitives, unsafe patterns).
+#   - shfmt:                Keeps formatting consistent across contributors.
+#   - trailing-whitespace,
+#     end-of-file-fixer,
+#     check-added-large-files,
+#     check-merge-conflict: Standard repo hygiene.
+#   - detect-private-key:   Belt-and-suspenders security check.
+
+repos:
+  # Repo-local hooks (parity guard lives in this repo).
+  - repo: local
+    hooks:
+      - id: check-parity
+        name: check parity (standalone ↔ embedded installer payload)
+        entry: bash scripts/check-parity.sh
+        language: system
+        pass_filenames: false
+        files: ^(sleep-after-claude|install-sleep-after-claude\.sh)$
+
+  # ShellCheck via the official pre-commit mirror.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning]
+        # .bats files use bats-core preprocessor syntax, not raw bash.
+        # Skip them — bats runs its own syntax check at test time.
+        exclude: '\.bats$'
+
+  # shfmt via the official pre-commit mirror.
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.13.1-1
+    hooks:
+      - id: shfmt
+        args: [-w, -i, '2', -ci]
+        exclude: '\.bats$'
+
+  # Standard hygiene hooks from the pre-commit org.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^tests/fixtures/'
+      - id: end-of-file-fixer
+        exclude: '^tests/fixtures/'
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: detect-private-key

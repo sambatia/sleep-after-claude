@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Enable this hook with:
-#   git config core.hooksPath .githooks
+# LEGACY standalone pre-commit hook.
+#
+# The project now uses the `pre-commit` framework (https://pre-commit.com)
+# with .pre-commit-config.yaml as the source of truth. Install it once
+# per clone with:
+#
+#   pre-commit install
+#
+# That puts a more capable shim in .git/hooks/pre-commit which runs the
+# parity guard, shellcheck, shfmt, and repo-hygiene hooks. If you haven't
+# installed the framework, this legacy hook still enforces parity when
+# activated via `git config core.hooksPath .githooks`.
 set -eu
 
 repo_root="$(git rev-parse --show-toplevel)"
