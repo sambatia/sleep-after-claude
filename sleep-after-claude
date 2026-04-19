@@ -218,14 +218,30 @@ SYSTEM_DAEMONS_REGEX='^(sharingd|powerd|useractivityd|bluetoothd|rcd|coreaudiod|
 
 # Parse pmset -g assertions into categorized arrays. Used by both full
 # scan and post-watch re-scan (which only needs this).
+#
+# PREFLIGHT_SCAN_OK is true only when `pmset -g assertions` ran AND produced
+# the expected "Listed by owning process" header. Verdict rendering must
+# treat empty blockers differently when the scan failed — an unverified
+# "clear" is worse than an explicit "scan unavailable".
+PREFLIGHT_SCAN_OK=false
 scan_assertions() {
-  local raw line parsing=false severity apid aname atype
-  raw="$(pmset -g assertions 2>/dev/null || echo "")"
+  local raw line parsing=false severity apid aname atype pmset_rc
+  raw="$(pmset -g assertions 2>/dev/null)"
+  pmset_rc=$?
 
   PREFLIGHT_ASSERTIONS=()
   PREFLIGHT_BLOCKERS=()
   PREFLIGHT_DISPLAY_ONLY=()
   PREFLIGHT_SYSTEM=()
+  PREFLIGHT_SCAN_OK=false
+
+  if [[ $pmset_rc -ne 0 || -z "$raw" ]]; then
+    return
+  fi
+  if [[ "$raw" != *"Listed by owning process"* ]]; then
+    return
+  fi
+  PREFLIGHT_SCAN_OK=true
 
   while IFS= read -r line; do
     if [[ "$line" == *"Listed by owning process"* ]]; then
@@ -363,7 +379,9 @@ render_preflight_brief() {
   else
     echo -e "  ${RED}✖${RESET} No target Claude process found"
   fi
-  if [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
+  if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
+    echo -e "  ${YELLOW}⚠${RESET}  Sleep-blocker scan unavailable (pmset failed or unexpected output)"
+  elif [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
     echo -e "  ${GREEN}✔${RESET} No sleep blockers detected"
   else
     echo -e "  ${RED}✖${RESET} ${#PREFLIGHT_BLOCKERS[@]} sleep blocker(s):"
@@ -479,7 +497,11 @@ render_preflight() {
   echo -e "  ${BOLD}${MAGENTA}Verdict${RESET}"
   echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
   echo ""
-  if [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
+  if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
+    echo -e "  ${YELLOW}⚠ Sleep-blocker scan unavailable.${RESET}"
+    echo -e "  ${DIM}pmset -g assertions failed or returned unexpected output —${RESET}"
+    echo -e "  ${DIM}cannot verify whether the Mac will actually sleep.${RESET}"
+  elif [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
     echo -e "  ${GREEN}✔ No active sleep blockers detected.${RESET}"
     echo -e "  ${DIM}Releasing caffeinate will allow the Mac to sleep normally.${RESET}"
     if [[ ${#PREFLIGHT_SYSTEM[@]} -gt 0 ]]; then
@@ -591,7 +613,14 @@ render_preflight_json() {
   printf '    "hibernate_mode": "%s",\n'    "$(json_escape "${PREFLIGHT_HIBERNATE_MODE:-?}")"
   printf '    "lid": "%s"\n'                "$(json_escape "$lid_display")"
   printf '  },\n'
-  printf '  "can_sleep": %s,\n' "$([[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]] && echo true || echo false)"
+  printf '  "scan_ok": %s,\n' "$([[ "$PREFLIGHT_SCAN_OK" == true ]] && echo true || echo false)"
+  # can_sleep: true only when scan succeeded AND no blockers. Null when the
+  # scan failed — consumers must not treat that as a green light.
+  if [[ "$PREFLIGHT_SCAN_OK" == true ]]; then
+    printf '  "can_sleep": %s,\n' "$([[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]] && echo true || echo false)"
+  else
+    printf '  "can_sleep": null,\n'
+  fi
   printf '  "blocker_count": %d\n' "${#PREFLIGHT_BLOCKERS[@]}"
   printf '}\n'
 }
@@ -854,7 +883,26 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
     render_preflight
   fi
 
-  if [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
+  if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
+    log_event "PREFLIGHT_SCAN_FAILED"
+    if [[ "$FORCE" == false ]]; then
+      if [[ "$STDIN_IS_TTY" == true ]]; then
+        if ! prompt_confirm "${BOLD}Sleep-blocker scan failed. Proceed anyway?${RESET} [y/N]:"; then
+          print_warn "Aborted by user. Claude is still running; caffeinate untouched."
+          echo ""
+          exit 0
+        fi
+        echo ""
+      else
+        print_error "Sleep-blocker scan failed and stdin is not a TTY for confirmation."
+        print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+        exit 1
+      fi
+    else
+      print_warn "Sleep-blocker scan failed but --force was given — proceeding."
+      echo ""
+    fi
+  elif [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
     log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
     if [[ "$FORCE" == false ]]; then
       if [[ "$STDIN_IS_TTY" == true ]]; then
