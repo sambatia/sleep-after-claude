@@ -354,6 +354,11 @@ notify_macos() {
 }
 
 LOG_WRITE_FAILED=false
+# Appends a timestamped event line to $LOG_FILE when --log is active.
+# No-op when LOG_ENABLED is false. On first write failure emits a single
+# stderr warning; subsequent failures stay silent so the tick loop
+# doesn't spam. Return status when disabled is unspecified (no caller
+# checks it).
 log_event() {
   [[ "$LOG_ENABLED" == true ]] || return
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true

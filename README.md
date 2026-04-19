@@ -33,3 +33,20 @@ goodnight              # watch Claude + sleep when finished
 ```
 
 macOS only.
+
+## Contributing
+
+Project knowledge for humans and agents lives in [CLAUDE.md](CLAUDE.md) — architecture, conventions, the parity invariant between the standalone script and the installer, and the audit-cycle history.
+
+Regression tests use [bats-core](https://github.com/bats-core/bats-core):
+
+```bash
+bats tests/                 # full suite
+bash scripts/check-parity.sh # verify embedded installer payload matches standalone
+```
+
+Enable the parity pre-commit hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
