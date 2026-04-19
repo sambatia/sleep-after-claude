@@ -1187,6 +1187,23 @@ get_battery_percent() {
   pmset -g batt 2>/dev/null | grep -oE '[0-9]+%' | head -1
 }
 
+# Render a small unicode battery gauge for a percentage.
+# Usage: render_battery_gauge 62  →  ▓▓▓▓▓▓░░░░ 62%
+# Width is 10 blocks by default. Returns an empty string if the input
+# isn't a 0–100 integer.
+render_battery_gauge() {
+  local raw="$1" width="${2:-10}" pct_num filled empty bar
+  # Accept "62", "62%", " 62 ", etc.
+  pct_num="$(printf '%s' "$raw" | tr -cd '0-9')"
+  [[ -z "$pct_num" ]] && return 0
+  ((pct_num < 0)) && pct_num=0
+  ((pct_num > 100)) && pct_num=100
+  filled=$((pct_num * width / 100))
+  empty=$((width - filled))
+  bar="$(printf '%*s' "$filled" '' | tr ' ' '▓')$(printf '%*s' "$empty" '' | tr ' ' '░')"
+  printf '%s %d%%' "$bar" "$pct_num"
+}
+
 # Block until external power is connected. If already on AC (or
 # unknown power state), returns immediately. When on battery, shows a
 # calm warning, then polls pmset every 2 seconds with a spinner.
@@ -1198,20 +1215,29 @@ wait_for_ac_power() {
   [[ "$ALLOW_BATTERY" == true ]] && return 0
   [[ "$FORCE" == true ]] && return 0
 
-  local src pct
+  local src pct gauge
   src="$(get_power_source)"
   if [[ "$src" != "Battery" ]]; then
     return 0
   fi
 
   pct="$(get_battery_percent)"
+  gauge="$(render_battery_gauge "$pct")"
+
   echo ""
-  echo -e "  ${BOLD}${YELLOW}⚡  External power required${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
-  echo -e "  ${YELLOW}Your Mac is running on battery${pct:+ (${pct})}.${RESET}"
-  echo -e "  ${DIM}For long unattended tasks, please connect your charger.${RESET}"
-  echo -e "  ${DIM}goodnight will resume automatically the moment AC power is detected.${RESET}"
-  echo -e "  ${DIM}Press Ctrl+C to abort, or re-run with --allow-battery to override.${RESET}"
+  echo -e "  ${BOLD}${YELLOW}╭─ ⚡  External power required ──────────────────────────╮${RESET}"
+  echo -e "  ${YELLOW}│${RESET}"
+  if [[ -n "$gauge" ]]; then
+    echo -e "  ${YELLOW}│${RESET}   ${BOLD}Battery:${RESET}  ${YELLOW}${gauge}${RESET}"
+  fi
+  echo -e "  ${YELLOW}│${RESET}"
+  echo -e "  ${YELLOW}│${RESET}   Please connect your charger. goodnight will resume"
+  echo -e "  ${YELLOW}│${RESET}   automatically the moment AC power is detected."
+  echo -e "  ${YELLOW}│${RESET}"
+  echo -e "  ${YELLOW}│${RESET}   ${DIM}Press Ctrl+C to abort, or override with${RESET}"
+  echo -e "  ${YELLOW}│${RESET}   ${DIM}${BOLD}goodnight --allow-battery${RESET}${DIM}${RESET}"
+  echo -e "  ${YELLOW}│${RESET}"
+  echo -e "  ${BOLD}${YELLOW}╰────────────────────────────────────────────────────────╯${RESET}"
   echo ""
   log_event "POWER_GATE_WAITING battery_pct=${pct:-unknown}"
 
@@ -1230,8 +1256,15 @@ wait_for_ac_power() {
     now_ts=$(date +%s)
     elapsed=$((now_ts - start_ts))
     pct="$(get_battery_percent)"
+    gauge="$(render_battery_gauge "$pct")"
     if [[ "$USE_SPINNER" == true ]]; then
-      printf "\r  ${CYAN}${frames[$tick]}${RESET}  ${DIM}Waiting for charger… %ds elapsed${pct:+  battery: ${pct}}${RESET}      " "$elapsed"
+      # Static format string; every dynamic value passes through %s so
+      # stray `%` characters in $pct / $gauge can never corrupt it.
+      printf "\r  %s%s%s  %sWaiting for charger…%s  %ds  %s%s%s      " \
+        "$CYAN" "${frames[$tick]}" "$RESET" \
+        "$DIM" "$RESET" \
+        "$elapsed" \
+        "$YELLOW" "${gauge:-on battery}" "$RESET"
     else
       # Non-TTY: emit a status line every 30 seconds so callers have
       # something to watch.
@@ -1244,10 +1277,15 @@ wait_for_ac_power() {
   done
 
   # Clear the spinner line.
-  [[ "$USE_SPINNER" == true ]] && printf "\r%-72s\r" " "
+  [[ "$USE_SPINNER" == true ]] && printf "\r%-80s\r" " "
 
   pct="$(get_battery_percent)"
-  print_ok "External power detected${pct:+ (battery: ${pct})} — resuming."
+  gauge="$(render_battery_gauge "$pct")"
+  if [[ -n "$gauge" ]]; then
+    print_ok "External power detected  ${GREEN}${gauge}${RESET} — resuming."
+  else
+    print_ok "External power detected — resuming."
+  fi
   log_event "POWER_GATE_RELEASED battery_pct=${pct:-unknown}"
   echo ""
 }
@@ -1754,8 +1792,12 @@ while kill -0 "$TARGET_PID" 2>/dev/null; do
   fi
 
   if [[ "$USE_SPINNER" == true ]]; then
-    printf "\r  ${CYAN}${FRAMES[$TICK]}${RESET}  ${DIM}Waiting for PID $TARGET_PID… %s elapsed${RESET}" \
-      "$(elapsed_label $ELAPSED)"
+    # Static format; all dynamics go through %s so stray `%` can't
+    # corrupt the format string (same safety pattern as wait_for_ac_power).
+    printf "\r  %s%s%s  %sWaiting for PID %s…%s  %s elapsed     " \
+      "$CYAN" "${FRAMES[$TICK]}" "$RESET" \
+      "$DIM" "$TARGET_PID" "$RESET" \
+      "$(elapsed_label "$ELAPSED")"
   else
     if ((ELAPSED - LAST_STATUS_LOG >= 300)); then
       echo "  … still waiting for PID $TARGET_PID ($(elapsed_label $ELAPSED) elapsed)"

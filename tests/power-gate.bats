@@ -6,12 +6,14 @@ load 'lib/common'
 
 setup() {
   setup_sandbox
-  # Extract the three power functions in isolation.
+  # Extract the four power functions in isolation (wait_for_ac_power
+  # calls render_battery_gauge, so both must be sourced).
   {
-    sed -n '/^get_power_source() {$/,/^}$/p'     "$REPO_ROOT/sleep-after-claude"
-    sed -n '/^get_battery_percent() {$/,/^}$/p'  "$REPO_ROOT/sleep-after-claude"
-    sed -n '/^wait_for_ac_power() {$/,/^}$/p'    "$REPO_ROOT/sleep-after-claude"
-  } > "$BATS_TEST_TMPDIR/power.sh"
+    sed -n '/^get_power_source() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^get_battery_percent() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^render_battery_gauge() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^wait_for_ac_power() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+  } >"$BATS_TEST_TMPDIR/power.sh"
   [ -s "$BATS_TEST_TMPDIR/power.sh" ]
 }
 
@@ -140,7 +142,7 @@ EOF
   " 2>&1
   [ "$status" -eq 0 ]
   assert_contains "$output" "External power required"
-  assert_contains "$output" "running on battery"
+  assert_contains "$output" "Please connect your charger"
   assert_contains "$output" "External power detected"
   assert_contains "$output" "DONE"
   assert_contains "$output" "log: POWER_GATE_WAITING"
