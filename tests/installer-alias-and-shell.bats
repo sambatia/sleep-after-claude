@@ -65,6 +65,31 @@ EOF
   assert_not_contains "$output" "/old/path"
 }
 
+@test "UX: fresh install adds ~/bin to PATH in the rc file" {
+  SHELL=/bin/zsh run bash "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'export PATH="\$HOME/bin:\$PATH"' "$HOME/.zshrc"
+  [ "$output" -eq 1 ]
+  assert_contains "$(cat "$HOME/.zshrc")" "~/bin on PATH"
+}
+
+@test "UX: reinstall does not duplicate the PATH export" {
+  SHELL=/bin/zsh bash "$REPO_ROOT/install-sleep-after-claude.sh" >/dev/null
+  SHELL=/bin/zsh bash "$REPO_ROOT/install-sleep-after-claude.sh" >/dev/null
+  run grep -c 'export PATH="\$HOME/bin:\$PATH"' "$HOME/.zshrc"
+  [ "$output" -eq 1 ]
+}
+
+@test "UX: existing PATH export that mentions \$HOME/bin is respected" {
+  # User has their own PATH line — installer must not append a second.
+  cat > "$HOME/.zshrc" <<'EOF'
+export PATH="$HOME/bin:/usr/local/bin:$PATH"
+EOF
+  SHELL=/bin/zsh bash "$REPO_ROOT/install-sleep-after-claude.sh" >/dev/null
+  run grep -c '\$HOME/bin' "$HOME/.zshrc"
+  [ "$output" -eq 1 ]
+}
+
 @test "F-11: unknown shell skips alias install and writes no rc file" {
   SHELL=/usr/local/bin/fish run bash "$REPO_ROOT/install-sleep-after-claude.sh"
   [ "$status" -eq 0 ]

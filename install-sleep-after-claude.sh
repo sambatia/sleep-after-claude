@@ -52,11 +52,11 @@ if [[ ! -d "$HOME/bin" ]]; then
 fi
 ok "~/bin ready"
 
-# ── 3. Warn if ~/bin not on PATH ──────────────────────────────────
-if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
-  warn "~/bin is not on your PATH — the 'goodnight' alias will still work,"
-  warn "but you won't be able to call 'sleep-after-claude' directly without ~/bin/."
-fi
+# ── 3. ~/bin PATH handling — deferred until we know the rc file ──
+# Step 8 below adds `export PATH="$HOME/bin:$PATH"` to the shell rc
+# when the alias is installed. This makes `sleep-after-claude` directly
+# callable in future shell sessions without the user ever needing to
+# touch PATH manually.
 
 # ── 4. Backup existing install ────────────────────────────────────
 TARGET="$HOME/bin/sleep-after-claude"
@@ -76,11 +76,11 @@ SELF="${BASH_SOURCE[0]:-$0}"
 TMP_SELF=""
 if [[ ! -f "$SELF" ]]; then
   SOURCE_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
-  warn "Installer was piped (no local file); re-downloading from:"
-  warn "  $SOURCE_URL"
-  warn "To pin to a known-good copy, re-run with:"
-  warn "  SLEEP_AFTER_CLAUDE_INSTALLER_URL=<raw-url-at-commit-sha> bash ..."
-  warn "  SLEEP_AFTER_CLAUDE_INSTALLER_SHA256=<hex> to enforce a checksum"
+  # Calm single-line message (this is the normal `curl | bash` path —
+  # not an error). Advanced users wanting SHA-256 provenance can find
+  # the env-var recipe in the README; we don't surface it here because
+  # it's noise for the 99% non-technical install flow.
+  say "Fetching installer payload from $SOURCE_URL"
   TMP_SELF="$(mktemp -t sleep-after-claude-installer.XXXXXX)"
   if ! curl -fsSL "$SOURCE_URL" -o "$TMP_SELF"; then
     fail "Could not re-download installer from $SOURCE_URL"
@@ -186,6 +186,28 @@ else
     echo "alias goodnight=\"$HOME/bin/sleep-after-claude\""
   } >> "$RC"
   ok "Alias 'goodnight' added to $(basename "$RC")"
+
+  # Ensure ~/bin is on PATH for future shell sessions. Dedupe the same
+  # way as the alias line so reinstalls don't accumulate duplicates.
+  PATH_LINE="export PATH=\"\$HOME/bin:\$PATH\""
+  if grep -qF "$PATH_LINE" "$RC" 2>/dev/null; then
+    : # already present, leave it
+  else
+    # Also detect near-equivalents (e.g. quoted differently) so we
+    # don't append a second PATH line that contradicts a prior manual
+    # edit.
+    if grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*\$HOME/bin' "$RC" 2>/dev/null \
+       || grep -qE '^[[:space:]]*export[[:space:]]+PATH=.*'"$HOME/bin" "$RC" 2>/dev/null; then
+      : # some PATH export mentioning $HOME/bin already exists
+    else
+      {
+        echo ''
+        echo '# Put ~/bin on PATH so sleep-after-claude is callable directly (added by installer)'
+        echo "$PATH_LINE"
+      } >> "$RC"
+      ok "~/bin added to PATH in $(basename "$RC")"
+    fi
+  fi
 fi
 
 # ── 9. Verification ───────────────────────────────────────────────

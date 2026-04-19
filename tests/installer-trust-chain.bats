@@ -23,12 +23,14 @@ run_piped_install() {
     bash < "$REPO_ROOT/install-sleep-after-claude.sh"
 }
 
-@test "F-02: piped install warns that re-download is happening" {
+@test "F-02: piped install shows a calm single-line fetch message" {
   run run_piped_install
   [ "$status" -eq 0 ]
-  assert_contains "$output" "Installer was piped"
-  assert_contains "$output" "re-downloading from"
-  assert_contains "$output" "SLEEP_AFTER_CLAUDE_INSTALLER_SHA256"
+  # Non-technical UX: one calm ✓-style info line, no yellow ⚠ stack.
+  assert_contains "$output" "Fetching installer payload from"
+  # Pin/SHA256 advice lives in the README, not in the happy-path log.
+  assert_not_contains "$output" "SLEEP_AFTER_CLAUDE_INSTALLER_SHA256"
+  assert_not_contains "$output" "To pin to a known-good copy"
 }
 
 @test "F-02: piped install installs the binary and alias successfully" {
