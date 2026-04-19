@@ -76,6 +76,7 @@ JSON_OUTPUT=false
 SKIP_UPDATE_CHECK=false
 NO_AUTO_CAFFEINATE=false
 ALLOW_BATTERY=false
+LOG_SUMMARY=false
 UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
 UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
 UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
@@ -96,6 +97,172 @@ print_done() {
   echo ""
   echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"
   echo ""
+}
+
+# ── gum / glow integration ────────────────────────────────────
+# These are optional polish layers. When `gum` (charmbracelet/gum) is
+# on PATH and stdout is a TTY, interactive prompts and styled cards
+# use gum for a prettier experience. When absent, everything falls
+# back to the hand-rolled bash UI. Users can force the fallback with
+# SAC_NO_GUM=1 (e.g. for CI, scripts, or minimal terminals).
+have_gum() {
+  [[ "${SAC_NO_GUM:-}" != "1" ]] && [[ "$STDOUT_IS_TTY" == true ]] && command -v gum >/dev/null 2>&1
+}
+have_glow() {
+  [[ "${SAC_NO_GLOW:-}" != "1" ]] && [[ "$STDOUT_IS_TTY" == true ]] && command -v glow >/dev/null 2>&1
+}
+
+# Styled panel: gum-powered rounded box with colored border if gum is
+# available, otherwise the existing hand-drawn ╭─╮ card. Each argument
+# is one content line.
+#
+# Usage: ui_panel <color> <title> <line1> <line2> ...
+#   color: "warning" | "info" | "success" | "danger"
+ui_panel() {
+  local kind="$1"
+  shift
+  local title="$1"
+  shift
+  local -a lines=("$@")
+
+  if have_gum; then
+    local fg border
+    case "$kind" in
+      warning)
+        fg=214
+        border=214
+        ;;
+      info)
+        fg=39
+        border=39
+        ;;
+      success)
+        fg=46
+        border=46
+        ;;
+      danger)
+        fg=196
+        border=196
+        ;;
+      *)
+        fg=250
+        border=250
+        ;;
+    esac
+    # gum style takes each argument as a separate line and renders
+    # them inside the box. --bold applies to the whole block; we
+    # use an explicit bold title and plain content by calling
+    # gum style twice and nesting via gum join.
+    local title_block content_block
+    title_block="$(gum style --foreground "$fg" --bold -- "$title")"
+    content_block="$(printf '%s\n' "${lines[@]}" | gum style)"
+    gum style \
+      --border rounded \
+      --border-foreground "$border" \
+      --padding "1 2" \
+      --margin "1 0" \
+      -- "$title_block" "" "$content_block"
+    return
+  fi
+
+  # Fallback: hand-drawn box (current style).
+  local color="$YELLOW"
+  case "$kind" in
+    info) color="$BLUE" ;;
+    success) color="$GREEN" ;;
+    danger) color="$RED" ;;
+  esac
+  local rule="────────────────────────────────────────────────────────"
+  echo ""
+  echo -e "  ${BOLD}${color}╭─ ${title} ${rule:0:$((54 - ${#title}))}╮${RESET}"
+  echo -e "  ${color}│${RESET}"
+  local line
+  for line in "${lines[@]}"; do
+    if [[ -z "$line" ]]; then
+      echo -e "  ${color}│${RESET}"
+    else
+      echo -e "  ${color}│${RESET}   ${line}"
+    fi
+  done
+  echo -e "  ${color}│${RESET}"
+  echo -e "  ${BOLD}${color}╰──────────────────────────────────────────────────────────╯${RESET}"
+  echo ""
+}
+
+# gum-powered yes/no confirm with fallback to prompt_confirm.
+# Usage: ui_confirm "Proceed anyway?"   (returns 0 on yes, 1 on no)
+ui_confirm() {
+  local prompt="$1"
+  if have_gum; then
+    # --default=false means Enter selects No (safe default).
+    gum confirm --default=false "$prompt"
+    return $?
+  fi
+  prompt_confirm "${BOLD}${prompt}${RESET} [y/N]:"
+}
+
+# gum-powered single-choice menu with fallback to stdin read.
+# Usage:
+#   ui_choose "Header text" \
+#     "opt1|First option description" \
+#     "opt2|Second option"
+# Returns the chosen option key (before the pipe) on stdout.
+ui_choose() {
+  local header="$1"
+  shift
+  local -a items=("$@")
+  if have_gum; then
+    local -a labels=()
+    local item
+    for item in "${items[@]}"; do
+      labels+=("${item#*|}")
+    done
+    local chosen_label
+    chosen_label="$(gum choose --header "$header" -- "${labels[@]}")" || return 130
+    # Map label back to key
+    for item in "${items[@]}"; do
+      if [[ "${item#*|}" == "$chosen_label" ]]; then
+        echo "${item%%|*}"
+        return 0
+      fi
+    done
+    return 1
+  fi
+  # Fallback: render labels + read a single-letter key.
+  local item
+  echo "  $header"
+  for item in "${items[@]}"; do
+    local key="${item%%|*}" label="${item#*|}"
+    echo -e "    ${CYAN}[${key:0:1}]${RESET} ${label}"
+  done
+  local choice
+  printf "  Choice: "
+  read -r choice
+  choice="$(echo "$choice" | tr '[:upper:]' '[:lower:]' | cut -c1)"
+  for item in "${items[@]}"; do
+    local key="${item%%|*}"
+    if [[ "${key:0:1}" == "$choice" ]]; then
+      echo "$key"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# gum spin wrapper with fallback to a simple message. The command
+# runs inside the spinner; its exit status is returned.
+# Usage: ui_spin "Fetching..." -- curl -fsSL url -o file
+ui_spin() {
+  local title="$1"
+  shift
+  # Skip the `--` separator if present.
+  [[ "${1:-}" == "--" ]] && shift
+  if have_gum; then
+    gum spin --spinner minidot --title "$title" --show-output -- "$@"
+    return $?
+  fi
+  print_step "$title"
+  "$@"
 }
 
 clear_line() {
@@ -771,20 +938,16 @@ prompt_and_handle_blockers() {
     return 1
   fi
 
-  echo -e "  ${BOLD}How would you like to proceed?${RESET}"
+  local -a menu=()
   if [[ ${#user_blockers[@]} -gt 0 ]]; then
-    echo -e "    ${CYAN}[t]${RESET} Attempt to terminate the ${#user_blockers[@]} user app(s) listed above ${DIM}(recommended)${RESET}"
+    menu+=("t|Terminate the ${#user_blockers[@]} user app(s) listed above (recommended)")
   fi
-  echo -e "    ${CYAN}[s]${RESET} Skip — proceed with watch; sleep may not succeed"
-  echo -e "    ${CYAN}[a]${RESET} Abort — I'll handle these manually"
-  echo ""
+  menu+=(
+    "s|Skip — proceed with watch; sleep may not succeed"
+    "a|Abort — I'll handle these manually"
+  )
   local choice
-  printf "  Choice [%st/s/a]: " ""
-  if [[ ${#user_blockers[@]} -eq 0 ]]; then
-    printf "\r  Choice [s/a]: "
-  fi
-  read -r choice
-  choice="$(echo "$choice" | tr '[:upper:]' '[:lower:]')"
+  choice="$(ui_choose "How would you like to proceed?" "${menu[@]}")"
   case "$choice" in
     t | terminate)
       if [[ ${#user_blockers[@]} -eq 0 ]]; then
@@ -964,21 +1127,17 @@ wait_for_ac_power() {
   pct="$(get_battery_percent)"
   gauge="$(render_battery_gauge "$pct")"
 
-  echo ""
-  echo -e "  ${BOLD}${YELLOW}╭─ ⚡  External power required ──────────────────────────╮${RESET}"
-  echo -e "  ${YELLOW}│${RESET}"
-  if [[ -n "$gauge" ]]; then
-    echo -e "  ${YELLOW}│${RESET}   ${BOLD}Battery:${RESET}  ${YELLOW}${gauge}${RESET}"
-  fi
-  echo -e "  ${YELLOW}│${RESET}"
-  echo -e "  ${YELLOW}│${RESET}   Please connect your charger. goodnight will resume"
-  echo -e "  ${YELLOW}│${RESET}   automatically the moment AC power is detected."
-  echo -e "  ${YELLOW}│${RESET}"
-  echo -e "  ${YELLOW}│${RESET}   ${DIM}Press Ctrl+C to abort, or override with${RESET}"
-  echo -e "  ${YELLOW}│${RESET}   ${DIM}${BOLD}goodnight --allow-battery${RESET}${DIM}${RESET}"
-  echo -e "  ${YELLOW}│${RESET}"
-  echo -e "  ${BOLD}${YELLOW}╰────────────────────────────────────────────────────────╯${RESET}"
-  echo ""
+  # Styled warning card via gum (or hand-drawn fallback).
+  local -a panel_lines=()
+  [[ -n "$gauge" ]] && panel_lines+=("Battery:  ${gauge}" "")
+  panel_lines+=(
+    "Please connect your charger. goodnight will resume"
+    "automatically the moment AC power is detected."
+    ""
+    "Press Ctrl+C to abort, or override with:"
+    "  goodnight --allow-battery"
+  )
+  ui_panel warning "⚡  External power required" "${panel_lines[@]}"
   log_event "POWER_GATE_WAITING battery_pct=${pct:-unknown}"
 
   local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
@@ -1053,10 +1212,11 @@ check_for_update() {
   fi
 
   # Download remote script with a short timeout so the check never
-  # blocks for long on a slow network.
+  # blocks for long on a slow network. ui_spin shows a spinner when
+  # gum is installed; otherwise runs curl directly.
   local tmp_remote
   tmp_remote="$(mktemp -t sac-update-check.XXXXXX 2>/dev/null)" || return 0
-  if ! curl -fsSL --max-time 5 "$UPDATE_CHECK_URL" -o "$tmp_remote" 2>/dev/null; then
+  if ! ui_spin "Checking for updates…" -- curl -fsSL --max-time 5 "$UPDATE_CHECK_URL" -o "$tmp_remote" >/dev/null 2>&1; then
     rm -f "$tmp_remote"
     return 0
   fi
@@ -1091,7 +1251,7 @@ check_for_update() {
     print_warn "Not a TTY — skipping update prompt. Run ${BOLD}goodnight${RESET} interactively to update."
     return 0
   fi
-  if prompt_confirm "${BOLD}Update now?${RESET} [y/N]:"; then
+  if ui_confirm "Update now?"; then
     echo ""
     print_step "Running installer..."
     if curl -fsSL --max-time 30 "$UPDATE_INSTALLER_URL" | bash; then
@@ -1210,6 +1370,10 @@ while [[ $# -gt 0 ]]; do
       ALLOW_BATTERY=true
       shift
       ;;
+    --log-summary)
+      LOG_SUMMARY=true
+      shift
+      ;;
     --help | -h)
       echo ""
       echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
@@ -1234,6 +1398,7 @@ while [[ $# -gt 0 ]]; do
       echo -e "    --check-update        Force update check now (bypass 24h cache)"
       echo -e "    --no-auto-caffeinate  Don't auto-start caffeinate -dim if missing"
       echo -e "    --allow-battery       Proceed even if the Mac is on battery (default: wait for AC)"
+      echo -e "    --log-summary         Render the session log as pretty markdown (needs ~/.local/state log)"
       echo ""
       echo -e "  ${DIM}Output options:${RESET}"
       echo -e "    --brief, -b           Show only the verdict in preflight output"
@@ -1352,6 +1517,48 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
   exit 0
 fi
 
+# ── --log-summary mode ────────────────────────────────────────
+# Renders the session log as pretty markdown via `glow` when it's
+# installed; falls back to plain `tail` otherwise. Groups events by
+# PREFLIGHT_* / WATCH_* / CLAUDE_* / SLEEP_* so the reader can skim
+# an unattended night's activity at a glance.
+if [[ "$LOG_SUMMARY" == true ]]; then
+  if [[ ! -f "$LOG_FILE" ]]; then
+    print_warn "No log file at $LOG_FILE — run with --log first."
+    exit 0
+  fi
+  {
+    echo "# sleep-after-claude session log"
+    echo ""
+    echo "**File:** \`$LOG_FILE\`"
+    echo "**Total events:** $(wc -l <"$LOG_FILE" | tr -d ' ')"
+    echo ""
+    echo "## Recent events (last 50)"
+    echo ""
+    echo '```'
+    tail -50 "$LOG_FILE"
+    echo '```'
+    echo ""
+    echo "## Counts by category"
+    echo ""
+    echo "| Category | Count |"
+    echo "|---|---|"
+    for pat in WATCH_START CLAUDE_FINISHED SLEEP_ATTEMPT SLEEP_FAILED PREFLIGHT_BLOCKERS PREFLIGHT_SCAN_FAILED POWER_GATE_WAITING POWER_GATE_RELEASED AUTO_CAFFEINATE_STARTED CANCELLED TIMEOUT PID_REUSED; do
+      # grep -c always prints a count to stdout (even "0" when no match)
+      # and exits 1 on no-match — we only care about stdout here.
+      c="$(grep -c "$pat" "$LOG_FILE" 2>/dev/null)"
+      echo "| $pat | ${c:-0} |"
+    done
+  } | {
+    if have_glow; then
+      glow -
+    else
+      cat
+    fi
+  }
+  exit 0
+fi
+
 # ── Power-state gate ──────────────────────────────────────────
 # Must be the FIRST check on the actionable path — we don't want to
 # burn battery downloading updates or waiting for Claude when the
@@ -1434,7 +1641,7 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
     log_event "PREFLIGHT_SCAN_FAILED"
     if [[ "$FORCE" == false ]]; then
       if [[ "$STDIN_IS_TTY" == true ]]; then
-        if ! prompt_confirm "${BOLD}Sleep-blocker scan failed. Proceed anyway?${RESET} [y/N]:"; then
+        if ! ui_confirm "Sleep-blocker scan failed. Proceed anyway?"; then
           print_warn "Aborted by user. Claude is still running; caffeinate untouched."
           echo ""
           exit 0

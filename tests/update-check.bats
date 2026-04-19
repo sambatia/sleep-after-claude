@@ -12,12 +12,19 @@ load 'lib/common'
 setup() {
   setup_sandbox
   export SHELL=/bin/zsh
-  # Extract just the check_for_update function + its config globals.
+  # Extract check_for_update + its config globals + the ui_* helpers
+  # it now calls (ui_spin, ui_confirm). Tests force the bash-fallback
+  # path via SAC_NO_GUM=1 for deterministic output.
   {
     sed -n '/^UPDATE_CHECK_URL=/,/^UPDATE_CACHE_TTL_SECS=/p' "$REPO_ROOT/sleep-after-claude"
-    sed -n '/^check_for_update() {$/,/^}$/p'                "$REPO_ROOT/sleep-after-claude"
-  } > "$BATS_TEST_TMPDIR/check.sh"
+    sed -n '/^have_gum() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^have_glow() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^ui_confirm() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^ui_spin() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^check_for_update() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+  } >"$BATS_TEST_TMPDIR/check.sh"
   [ -s "$BATS_TEST_TMPDIR/check.sh" ]
+  export SAC_NO_GUM=1
 }
 
 @test "update-check: skipped when --skip-update-check logic is honored" {

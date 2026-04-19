@@ -6,15 +6,21 @@ load 'lib/common'
 
 setup() {
   setup_sandbox
-  # Extract the four power functions in isolation (wait_for_ac_power
-  # calls render_battery_gauge, so both must be sourced).
+  # Extract the power functions + their ui_* dependencies. Tests force
+  # the bash-fallback path by setting SAC_NO_GUM=1, so ui_panel just
+  # prints the hand-drawn card.
   {
+    sed -n '/^have_gum() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^have_glow() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
+    sed -n '/^ui_panel() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
     sed -n '/^get_power_source() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
     sed -n '/^get_battery_percent() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
     sed -n '/^render_battery_gauge() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
     sed -n '/^wait_for_ac_power() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
   } >"$BATS_TEST_TMPDIR/power.sh"
   [ -s "$BATS_TEST_TMPDIR/power.sh" ]
+  # Force fallback path in tests for deterministic output.
+  export SAC_NO_GUM=1
 }
 
 @test "get_power_source: returns AC when pmset reports 'AC Power'" {
