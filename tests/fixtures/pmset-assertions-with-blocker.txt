@@ -1,0 +1,17 @@
+Assertion status system-wide:
+   BackgroundTask                 0
+   PreventDiskIdle                1
+   ApplePushServiceTask           0
+   UserIsActive                   1
+   PreventUserIdleDisplaySleep    1
+   SoftwareUpdateTask             0
+   PreventSystemSleep             0
+   ExternalMedia                  0
+   PreventUserIdleSystemSleep     1
+   NetworkClientActive            0
+Listed by owning process:
+   pid 999(malicious-blocker): [0x0000000000000001] 00:00:10 PreventUserIdleSystemSleep named: "evil"
+   pid 349(powerd): [0x000058dc00019c06] 01:38:27 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"
+   pid 12345(caffeinate): [0x00000000deadbeef] 00:10:00 PreventUserIdleSystemSleep named: "caffeinate"
+Kernel Assertions: 0x1=USB
+   id=501  level=255 0x1=USB mod=04/12/2026, 13:14, description=AppleUSBXHCI
