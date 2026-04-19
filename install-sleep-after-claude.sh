@@ -353,10 +353,20 @@ notify_macos() {
   osascript -e "display notification \"$msg\" with title \"$title\"" 2>/dev/null || true
 }
 
+LOG_WRITE_FAILED=false
 log_event() {
   [[ "$LOG_ENABLED" == true ]] || return
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
+  # Brace group + outer 2>/dev/null so the shell's own "No such file or
+  # directory" error on a failed >> redirection is also suppressed, not
+  # just errors produced by the command itself.
+  if ! { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; } 2>/dev/null; then
+    # Warn once per session so the user knows durability is broken.
+    if [[ "$LOG_WRITE_FAILED" == false ]]; then
+      LOG_WRITE_FAILED=true
+      echo "  ⚠  log write failed: $LOG_FILE (subsequent failures will be silent)" >&2
+    fi
+  fi
 }
 
 micro_sleep() {
@@ -1097,6 +1107,12 @@ else
 fi
 
 TARGET_CMD_FULL="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
+# Extract just the binary path (first whitespace-separated token). argv
+# can legitimately mutate at runtime via setproctitle/exec -a/etc., so
+# we compare only the binary for PID-reuse detection — a full-string
+# compare would false-positive on a legitimate argv change and sleep
+# the Mac mid-task.
+TARGET_BIN="$(echo "$TARGET_CMD_FULL" | awk '{print $1}')"
 
 # ── Pre-flight scan + verdict + optional confirmation ─────────
 if [[ "$SKIP_PREFLIGHT" == false ]]; then
@@ -1191,9 +1207,10 @@ while kill -0 "$TARGET_PID" 2>/dev/null; do
     ELAPSED=$(( NOW - START_TIME ))
   fi
 
-  if [[ -n "$TARGET_CMD_FULL" ]] && (( TICK_COUNT % 300 == 0 )) && (( TICK_COUNT > 0 )); then
+  if [[ -n "$TARGET_BIN" ]] && (( TICK_COUNT % 300 == 0 )) && (( TICK_COUNT > 0 )); then
     CURRENT_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
-    if [[ -n "$CURRENT_CMD" && "$CURRENT_CMD" != "$TARGET_CMD_FULL" ]]; then
+    CURRENT_BIN="$(echo "$CURRENT_CMD" | awk '{print $1}')"
+    if [[ -n "$CURRENT_BIN" && "$CURRENT_BIN" != "$TARGET_BIN" ]]; then
       clear_line
       print_warn "PID $TARGET_PID was reused by another process — treating as finished."
       log_event "PID_REUSED pid=$TARGET_PID was=\"$TARGET_CMD_FULL\" now=\"$CURRENT_CMD\""
