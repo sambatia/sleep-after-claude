@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Enable this hook with:
+#   git config core.hooksPath .githooks
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+changed="$(git diff --cached --name-only)"
+if echo "$changed" | grep -qE '^(sleep-after-claude|install-sleep-after-claude\.sh)$'; then
+  bash scripts/check-parity.sh
+fi

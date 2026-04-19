@@ -70,16 +70,55 @@ say "Extracting sleep-after-claude to ~/bin/..."
 
 # When run as `curl ... | bash`, BASH_SOURCE[0] and $0 are "bash" (not a file),
 # so awk can't read the installer. In that case, re-download it to a temp file.
+# The re-download is a second trust hop: we warn the user, sanity-check the
+# body, and optionally verify an sha256 pin if the caller provided one.
 SELF="${BASH_SOURCE[0]:-$0}"
 TMP_SELF=""
 if [[ ! -f "$SELF" ]]; then
   SOURCE_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
+  warn "Installer was piped (no local file); re-downloading from:"
+  warn "  $SOURCE_URL"
+  warn "To pin to a known-good copy, re-run with:"
+  warn "  SLEEP_AFTER_CLAUDE_INSTALLER_URL=<raw-url-at-commit-sha> bash ..."
+  warn "  SLEEP_AFTER_CLAUDE_INSTALLER_SHA256=<hex> to enforce a checksum"
   TMP_SELF="$(mktemp -t sleep-after-claude-installer.XXXXXX)"
   if ! curl -fsSL "$SOURCE_URL" -o "$TMP_SELF"; then
     fail "Could not re-download installer from $SOURCE_URL"
     rm -f "$TMP_SELF"
     exit 1
   fi
+
+  # Sanity-check the downloaded payload before trusting it.
+  # 1. Size must be within a plausible envelope (guards against HTML error
+  #    pages, truncated CDN responses, and absurd payloads).
+  TMP_SIZE="$(wc -c < "$TMP_SELF" | tr -d ' ')"
+  if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || (( TMP_SIZE < 2000 || TMP_SIZE > 524288 )); then
+    fail "Downloaded installer has implausible size (${TMP_SIZE} bytes) — aborting."
+    rm -f "$TMP_SELF"
+    exit 1
+  fi
+  # 2. Must contain both payload markers.
+  if ! grep -q '^__SCRIPT_START__$' "$TMP_SELF" || ! grep -q '^__SCRIPT_END__$' "$TMP_SELF"; then
+    fail "Downloaded installer is missing payload markers — aborting."
+    rm -f "$TMP_SELF"
+    exit 1
+  fi
+  # 3. Optional sha256 pin.
+  if [[ -n "${SLEEP_AFTER_CLAUDE_INSTALLER_SHA256:-}" ]]; then
+    if ! command -v shasum >/dev/null 2>&1; then
+      fail "shasum not available — cannot verify SLEEP_AFTER_CLAUDE_INSTALLER_SHA256."
+      rm -f "$TMP_SELF"
+      exit 1
+    fi
+    GOT_SHA="$(shasum -a 256 "$TMP_SELF" | awk '{print $1}')"
+    if [[ "$GOT_SHA" != "$SLEEP_AFTER_CLAUDE_INSTALLER_SHA256" ]]; then
+      fail "Checksum mismatch — expected $SLEEP_AFTER_CLAUDE_INSTALLER_SHA256, got $GOT_SHA"
+      rm -f "$TMP_SELF"
+      exit 1
+    fi
+    ok "Installer checksum verified."
+  fi
+
   SELF="$TMP_SELF"
 fi
 
