@@ -1,0 +1,1049 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  sleep-after-claude
+#  Watches a Claude Code process and sleeps the Mac when done.
+#
+#  Includes a pre-flight scan of sleep-preventing processes and
+#  power assertions so you know whether sleep will actually happen.
+#
+#  Usage: sleep-after-claude [options]
+# ─────────────────────────────────────────────────────────────
+
+set -uo pipefail
+
+# ── macOS guard ───────────────────────────────────────────────
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "✖  sleep-after-claude only supports macOS." >&2
+  exit 1
+fi
+
+# ── Bash version + TTY detection ──────────────────────────────
+BASH_MAJOR="${BASH_VERSINFO[0]:-0}"
+USE_BUILTIN_SLEEP=false
+[[ $BASH_MAJOR -ge 4 ]] && USE_BUILTIN_SLEEP=true
+
+USE_SPINNER=true
+[[ -t 1 ]] || USE_SPINNER=false
+
+STDIN_IS_TTY=false
+[[ -t 0 ]] && STDIN_IS_TTY=true
+
+STDOUT_IS_TTY=false
+[[ -t 1 ]] && STDOUT_IS_TTY=true
+
+# ── Colours (disabled for non-TTY output) ─────────────────────
+if [[ "$STDOUT_IS_TTY" == true ]]; then
+  RESET="\033[0m"
+  BOLD="\033[1m"
+  DIM="\033[2m"
+  GREEN="\033[32m"
+  YELLOW="\033[33m"
+  CYAN="\033[36m"
+  RED="\033[31m"
+  BLUE="\033[34m"
+  MAGENTA="\033[35m"
+else
+  RESET=""; BOLD=""; DIM=""; GREEN=""; YELLOW=""; CYAN=""; RED=""; BLUE=""; MAGENTA=""
+fi
+
+# ── Config defaults ───────────────────────────────────────────
+TIMEOUT_HOURS=6
+DELAY_SECS=1
+TARGET_PID=""
+TARGET_PID_EXPLICIT=false
+NO_SOUND=false
+CAFFEINATE_ONLY=false
+DRY_RUN=false
+LIST_MODE=false
+NOTIFY=false
+LOG_ENABLED=false
+WAIT_FOR_START=false
+LOG_FILE="${HOME}/.local/state/sleep-after-claude.log"
+FIFO_DIR=""
+PREFLIGHT_ONLY=false
+SKIP_PREFLIGHT=false
+FORCE=false
+BRIEF=false
+JSON_OUTPUT=false
+
+# ── Helpers ───────────────────────────────────────────────────
+print_header() {
+  echo ""
+  echo -e "  ${BOLD}${BLUE}sleep-after-claude${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+}
+
+print_step()  { echo -e "  ${CYAN}›${RESET} $1"; }
+print_ok()    { echo -e "  ${GREEN}✔${RESET} $1"; }
+print_warn()  { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
+print_error() { echo -e "  ${RED}✖${RESET} $1"; }
+print_done()  { echo ""; echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"; echo ""; }
+
+clear_line() {
+  [[ "$USE_SPINNER" == true ]] && printf "\r%-72s\r" " "
+}
+
+is_integer()          { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+
+elapsed_label() {
+  local secs=$1
+  local h=$(( secs / 3600 ))
+  local m=$(( (secs % 3600) / 60 ))
+  local s=$(( secs % 60 ))
+  if   [[ $h -gt 0 ]]; then printf "%dh %02dm %02ds" $h $m $s
+  elif [[ $m -gt 0 ]]; then printf "%dm %02ds" $m $s
+  else                      printf "%ds" $s
+  fi
+}
+
+play_sound() {
+  [[ "$NO_SOUND" == true ]] && return
+  afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || true
+}
+
+# Escape for AppleScript double-quoted strings
+as_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# Escape for JSON string values
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+notify_macos() {
+  [[ "$NOTIFY" == true ]] || return
+  local msg title
+  msg="$(as_escape "$1")"
+  title="$(as_escape "sleep-after-claude")"
+  osascript -e "display notification \"$msg\" with title \"$title\"" 2>/dev/null || true
+}
+
+log_event() {
+  [[ "$LOG_ENABLED" == true ]] || return
+  mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+micro_sleep() {
+  if [[ "$USE_BUILTIN_SLEEP" == true ]]; then
+    read -rt "$1" -u 9 _ 2>/dev/null || true
+  else
+    sleep "$1"
+  fi
+}
+
+# ── Detect Claude processes ───────────────────────────────────
+# Blocklist covers processes that contain "claude" in path/args but
+# are NOT Claude Code CLI. Patterns anchored where possible to avoid
+# collateral damage (e.g. any process with "Helper" in the command).
+EXCLUDE_PATTERN='Claude\.app|Contents/Helpers/|chrome-native-host|--type=|/Electron|Electron\.app|Cursor\.app|Windsurf\.app|anthropic-tools'
+
+find_claude_processes() {
+  local script_name tight_pids tight_result
+  script_name="$(basename "$0")"
+
+  tight_pids=$(
+    { pgrep -x claude 2>/dev/null || true
+      pgrep -f "claude-code" 2>/dev/null || true
+    } | sort -u | grep -v "^$$\$" || true
+  )
+
+  if [[ -n "$tight_pids" ]]; then
+    tight_result=$(echo "$tight_pids" \
+      | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
+      | grep -iv "$script_name" \
+      | grep -iv "sleep-after" \
+      | grep -Ev "$EXCLUDE_PATTERN" \
+      || true)
+    if [[ -n "$tight_result" ]]; then
+      echo "$tight_result"
+      return
+    fi
+  fi
+
+  pgrep -fi "claude" 2>/dev/null \
+    | grep -v "^$$\$" \
+    | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
+    | grep -iv "$script_name" \
+    | grep -iv "sleep-after" \
+    | grep -Ev "$EXCLUDE_PATTERN" \
+    || true
+}
+
+find_all_claude_processes_raw() {
+  local script_name
+  script_name="$(basename "$0")"
+  pgrep -fi "claude" 2>/dev/null \
+    | grep -v "^$$\$" \
+    | xargs -I{} sh -c 'ps -p {} -o pid=,command= 2>/dev/null || true' \
+    | grep -iv "$script_name" \
+    | grep -iv "sleep-after" \
+    || true
+}
+
+# ── Pre-flight scan ───────────────────────────────────────────
+PREFLIGHT_TARGET=""
+PREFLIGHT_EXCLUDED=""
+PREFLIGHT_CAFFEINATE=""
+PREFLIGHT_ASSERTIONS=()
+PREFLIGHT_BLOCKERS=()
+PREFLIGHT_DISPLAY_ONLY=()
+PREFLIGHT_SYSTEM=()
+PREFLIGHT_LID=""
+PREFLIGHT_SESSIONS=""
+PREFLIGHT_BATTERY_PCT=""
+PREFLIGHT_BATTERY_SRC=""
+PREFLIGHT_SLEEP_MIN=""
+PREFLIGHT_DISPLAYSLEEP_MIN=""
+PREFLIGHT_HIBERNATE_MODE=""
+
+# Known-benign macOS system daemons. These routinely hold
+# PreventUserIdleSystemSleep assertions as part of normal operation but
+# do NOT actually prevent sleep — the OS releases them at sleep time.
+# Flagging these as blockers creates false alarms.
+#
+# Anchored to exact daemon names (case-sensitive, full match).
+SYSTEM_DAEMONS_REGEX='^(sharingd|powerd|useractivityd|bluetoothd|rcd|coreaudiod|apsd|locationd|cloudd|searchd|mDNSResponder|UserEventAgent|symptomsd|timed|trustd|cfprefsd|WindowServer|loginwindow|SystemUIServer|Dock|Finder|ControlCenter|NotificationCenter|identityservicesd|imagent|callservicesd|remindd|parsecd|bird|iconservicesagent|iconservicesd|diskarbitrationd|fseventsd|spindump|corespeechd|corespotlightd|nsurlsessiond|nsurlstoraged|assistantd|mediaremoted|distnoted|syspolicyd|amfid|taskgated|securityd|secinitd|opendirectoryd|configd|hidd|backlightd|thermalmonitord|pboard|launchservicesd|nfcd|airportd|wifiAgent|wifiFirmwareLoader|wifianalyticsd|watchdogd|appsleepd|routined|avconferenced|bluetoothuserd|gamecontrollerd)$'
+
+# Parse pmset -g assertions into categorized arrays. Used by both full
+# scan and post-watch re-scan (which only needs this).
+scan_assertions() {
+  local raw line parsing=false severity apid aname atype
+  raw="$(pmset -g assertions 2>/dev/null || echo "")"
+
+  PREFLIGHT_ASSERTIONS=()
+  PREFLIGHT_BLOCKERS=()
+  PREFLIGHT_DISPLAY_ONLY=()
+  PREFLIGHT_SYSTEM=()
+
+  while IFS= read -r line; do
+    if [[ "$line" == *"Listed by owning process"* ]]; then
+      parsing=true
+      continue
+    fi
+    [[ "$parsing" == false ]] && continue
+    [[ -z "${line// }" ]] && continue
+
+    if [[ "$line" =~ pid[[:space:]]+([0-9]+)\(([^\)]+)\).*\][[:space:]]+[^[:space:]]+[[:space:]]+([A-Za-z]+) ]]; then
+      apid="${BASH_REMATCH[1]}"
+      aname="${BASH_REMATCH[2]}"
+      atype="${BASH_REMATCH[3]}"
+
+      severity="info"
+      case "$atype" in
+        PreventSystemSleep)
+          # Even PreventSystemSleep from system daemons is usually benign,
+          # but keep as blocker since it's the stronger assertion type.
+          if [[ "$aname" =~ $SYSTEM_DAEMONS_REGEX ]]; then
+            severity="system"
+          else
+            severity="blocker"
+          fi
+          ;;
+        PreventUserIdleSystemSleep)
+          if [[ "$aname" == "caffeinate" ]]; then
+            severity="release"
+          elif [[ "$aname" =~ $SYSTEM_DAEMONS_REGEX ]]; then
+            severity="system"
+          else
+            severity="blocker"
+          fi
+          ;;
+        PreventUserIdleDisplaySleep|NoDisplaySleepAssertion)
+          severity="display" ;;
+        UserIsActive)
+          severity="user" ;;
+      esac
+
+      PREFLIGHT_ASSERTIONS+=("$severity|$apid|$aname|$atype")
+      [[ "$severity" == "blocker" ]] && PREFLIGHT_BLOCKERS+=("$apid|$aname|$atype")
+      [[ "$severity" == "display" ]] && PREFLIGHT_DISPLAY_ONLY+=("$apid|$aname|$atype")
+      [[ "$severity" == "system" ]]  && PREFLIGHT_SYSTEM+=("$apid|$aname|$atype")
+    fi
+  done <<< "$raw"
+}
+
+preflight_scan() {
+  local all_claude target_pid_set line pid batt pm batt_pct
+
+  # -- Claude target/excluded
+  # Honor --pid override: if user explicitly set TARGET_PID, use it.
+  if [[ "$TARGET_PID_EXPLICIT" == true && -n "$TARGET_PID" ]]; then
+    if kill -0 "$TARGET_PID" 2>/dev/null; then
+      PREFLIGHT_TARGET="$(ps -p "$TARGET_PID" -o pid=,command= 2>/dev/null || echo "")"
+    else
+      PREFLIGHT_TARGET=""
+    fi
+  else
+    PREFLIGHT_TARGET="$(find_claude_processes)"
+  fi
+
+  all_claude="$(find_all_claude_processes_raw)"
+  target_pid_set=""
+  if [[ -n "$PREFLIGHT_TARGET" ]]; then
+    target_pid_set="$(echo "$PREFLIGHT_TARGET" | awk '{print $1}' | sort -u)"
+  fi
+
+  PREFLIGHT_EXCLUDED=""
+  if [[ -n "$all_claude" ]]; then
+    while IFS= read -r line; do
+      pid="$(echo "$line" | awk '{print $1}')"
+      if ! echo "$target_pid_set" | grep -qx "$pid"; then
+        PREFLIGHT_EXCLUDED+="${line}"$'\n'
+      fi
+    done <<< "$all_claude"
+    PREFLIGHT_EXCLUDED="${PREFLIGHT_EXCLUDED%$'\n'}"
+  fi
+
+  # -- Caffeinate detail
+  PREFLIGHT_CAFFEINATE="$(
+    ps -axo pid=,user=,etime=,command= 2>/dev/null \
+      | awk '/[c]affeinate/' \
+      || true
+  )"
+
+  # -- Assertions
+  scan_assertions
+
+  # -- Power state
+  batt="$(pmset -g batt 2>/dev/null || echo "")"
+  pm="$(pmset -g 2>/dev/null || echo "")"
+
+  batt_pct="$(echo "$batt" | grep -oE '[0-9]+%' | head -1)"
+  if [[ -z "$batt_pct" ]]; then
+    PREFLIGHT_BATTERY_PCT="N/A"
+  else
+    PREFLIGHT_BATTERY_PCT="$batt_pct"
+  fi
+
+  if echo "$batt" | grep -q "AC Power"; then
+    PREFLIGHT_BATTERY_SRC="AC Power"
+  elif echo "$batt" | grep -q "Battery Power"; then
+    PREFLIGHT_BATTERY_SRC="Battery"
+  else
+    PREFLIGHT_BATTERY_SRC="unknown"
+  fi
+
+  PREFLIGHT_SLEEP_MIN="$(echo "$pm" | awk '/^ *sleep[[:space:]]/{print $2; exit}')"
+  PREFLIGHT_DISPLAYSLEEP_MIN="$(echo "$pm" | awk '/^ *displaysleep[[:space:]]/{print $2; exit}')"
+  PREFLIGHT_HIBERNATE_MODE="$(echo "$pm" | awk '/^ *hibernatemode[[:space:]]/{print $2; exit}')"
+
+  # -- Lid state
+  PREFLIGHT_LID="$(
+    ioreg -r -k AppleClamshellState 2>/dev/null \
+      | awk -F'= ' '/AppleClamshellState/ {print $2; exit}' \
+      | tr -d ' ' \
+      || echo "unknown"
+  )"
+  [[ -z "$PREFLIGHT_LID" ]] && PREFLIGHT_LID="unknown"
+
+  # -- Active user sessions
+  PREFLIGHT_SESSIONS="$(who 2>/dev/null || echo "")"
+}
+
+# -- Brief render (verdict only)
+render_preflight_brief() {
+  echo ""
+  if [[ -n "$PREFLIGHT_TARGET" ]]; then
+    local tgt_pid tgt_cmd
+    tgt_pid="$(echo "$PREFLIGHT_TARGET" | awk 'NR==1{print $1}')"
+    tgt_cmd="$(echo "$PREFLIGHT_TARGET" | awk 'NR==1{$1=""; sub(/^ /,""); print}' | cut -c1-50)"
+    echo -e "  ${GREEN}✔${RESET} Target: PID ${tgt_pid} ${DIM}→ ${tgt_cmd}${RESET}"
+  else
+    echo -e "  ${RED}✖${RESET} No target Claude process found"
+  fi
+  if [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
+    echo -e "  ${GREEN}✔${RESET} No sleep blockers detected"
+  else
+    echo -e "  ${RED}✖${RESET} ${#PREFLIGHT_BLOCKERS[@]} sleep blocker(s):"
+    local entry pid name type
+    for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+      IFS='|' read -r pid name type <<< "$entry"
+      echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${RED}${type}${RESET}"
+    done
+  fi
+  echo ""
+}
+
+# -- Full render
+render_preflight() {
+  if [[ "$BRIEF" == true ]]; then
+    render_preflight_brief
+    return
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}${MAGENTA}Pre-flight scan${RESET}"
+  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
+
+  echo ""
+  echo -e "  ${BOLD}Claude processes${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if [[ -n "$PREFLIGHT_TARGET" ]]; then
+    echo "$PREFLIGHT_TARGET" | while IFS= read -r line; do
+      echo -e "  ${GREEN}✔${RESET} Target:    ${line}"
+    done
+  else
+    echo -e "  ${RED}✖${RESET} No target Claude process found"
+  fi
+  if [[ -n "$PREFLIGHT_EXCLUDED" ]]; then
+    echo "$PREFLIGHT_EXCLUDED" | while IFS= read -r line; do
+      local epid ecmd
+      epid="$(echo "$line" | awk '{print $1}')"
+      ecmd="$(echo "$line" | awk '{$1=""; sub(/^ /,""); print}' | cut -c1-65)"
+      echo -e "  ${YELLOW}⊘${RESET} Excluded:  ${DIM}PID $epid  ${ecmd}${RESET}"
+    done
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}Caffeinate processes${RESET} ${DIM}(will be released)${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if [[ -n "$PREFLIGHT_CAFFEINATE" ]]; then
+    echo "$PREFLIGHT_CAFFEINATE" | while IFS= read -r line; do
+      echo -e "  ${DIM}${line}${RESET}"
+    done
+  else
+    echo -e "  ${DIM}  none running${RESET}"
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}Sleep assertions${RESET} ${DIM}(pmset -g assertions)${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if [[ ${#PREFLIGHT_ASSERTIONS[@]} -eq 0 ]]; then
+    echo -e "  ${DIM}  none${RESET}"
+  else
+    local entry sev pid name type
+    for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
+      IFS='|' read -r sev pid name type <<< "$entry"
+      case "$sev" in
+        blocker)
+          echo -e "  ${RED}✖${RESET} ${BOLD}${name}${RESET} (PID $pid): ${RED}${type}${RESET} ${DIM}← BLOCKS SYSTEM SLEEP${RESET}"
+          ;;
+        release)
+          echo -e "  ${GREEN}✔${RESET} ${name} (PID $pid): ${type} ${DIM}← will release${RESET}"
+          ;;
+        system)
+          echo -e "  ${DIM}ℹ  ${name} (PID $pid): ${type} (macOS system daemon — benign)${RESET}"
+          ;;
+        display)
+          echo -e "  ${YELLOW}⚠${RESET}  ${name} (PID $pid): ${type} ${DIM}← display only, system will still sleep${RESET}"
+          ;;
+        user)
+          echo -e "  ${DIM}ℹ  ${name} (PID $pid): ${type} (harmless — auto-dismissed when idle)${RESET}"
+          ;;
+        *)
+          echo -e "  ${DIM}ℹ  ${name} (PID $pid): ${type}${RESET}"
+          ;;
+      esac
+    done
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}Power state${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  echo -e "  ${DIM}Battery:        ${RESET}${PREFLIGHT_BATTERY_PCT} (${PREFLIGHT_BATTERY_SRC})"
+  echo -e "  ${DIM}Display sleep:  ${RESET}${PREFLIGHT_DISPLAYSLEEP_MIN:-?} min"
+  echo -e "  ${DIM}System sleep:   ${RESET}${PREFLIGHT_SLEEP_MIN:-?} min"
+  echo -e "  ${DIM}Hibernate mode: ${RESET}${PREFLIGHT_HIBERNATE_MODE:-?}"
+  local lid_display="unknown"
+  case "$PREFLIGHT_LID" in
+    Yes) lid_display="closed" ;;
+    No)  lid_display="open" ;;
+  esac
+  echo -e "  ${DIM}Lid:            ${RESET}${lid_display}"
+
+  echo ""
+  echo -e "  ${BOLD}Active user sessions${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if [[ -n "$PREFLIGHT_SESSIONS" ]]; then
+    echo "$PREFLIGHT_SESSIONS" | while IFS= read -r line; do
+      echo -e "  ${DIM}${line}${RESET}"
+    done
+  else
+    echo -e "  ${DIM}  none${RESET}"
+  fi
+
+  echo ""
+  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
+  echo -e "  ${BOLD}${MAGENTA}Verdict${RESET}"
+  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
+  echo ""
+  if [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
+    echo -e "  ${GREEN}✔ No active sleep blockers detected.${RESET}"
+    echo -e "  ${DIM}Releasing caffeinate will allow the Mac to sleep normally.${RESET}"
+    if [[ ${#PREFLIGHT_SYSTEM[@]} -gt 0 ]]; then
+      echo ""
+      echo -e "  ${DIM}Note: ${#PREFLIGHT_SYSTEM[@]} macOS system daemon assertion(s) detected —${RESET}"
+      echo -e "  ${DIM}these are released automatically by the OS at sleep time.${RESET}"
+    fi
+    if [[ ${#PREFLIGHT_DISPLAY_ONLY[@]} -gt 0 ]]; then
+      echo ""
+      echo -e "  ${DIM}Note: ${#PREFLIGHT_DISPLAY_ONLY[@]} display-only assertion(s) detected —${RESET}"
+      echo -e "  ${DIM}these keep the display awake but do not prevent system sleep.${RESET}"
+    fi
+  else
+    local count=${#PREFLIGHT_BLOCKERS[@]}
+    echo -e "  ${RED}✖ ${count} active system-sleep blocker(s) besides caffeinate:${RESET}"
+    echo ""
+    local entry pid name type
+    for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+      IFS='|' read -r pid name type <<< "$entry"
+      echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${RED}${type}${RESET}"
+    done
+    echo ""
+    echo -e "  ${YELLOW}Releasing caffeinate alone will NOT be sufficient.${RESET}"
+    echo -e "  ${DIM}These processes must also exit (or release their assertions)${RESET}"
+    echo -e "  ${DIM}before the Mac can actually sleep.${RESET}"
+  fi
+  echo ""
+}
+
+# -- JSON render
+render_preflight_json() {
+  local entry pid name type sev first
+  local target_pid="" target_cmd=""
+  if [[ -n "$PREFLIGHT_TARGET" ]]; then
+    target_pid="$(echo "$PREFLIGHT_TARGET" | awk 'NR==1{print $1}')"
+    target_cmd="$(echo "$PREFLIGHT_TARGET" | awk 'NR==1{$1=""; sub(/^ /,""); print}')"
+  fi
+
+  printf '{\n'
+  printf '  "target": '
+  if [[ -n "$target_pid" ]]; then
+    printf '{"pid": %s, "command": "%s"}' "$target_pid" "$(json_escape "$target_cmd")"
+  else
+    printf 'null'
+  fi
+  printf ',\n'
+
+  # Excluded
+  printf '  "excluded": ['
+  first=true
+  if [[ -n "$PREFLIGHT_EXCLUDED" ]]; then
+    while IFS= read -r line; do
+      local epid ecmd
+      epid="$(echo "$line" | awk '{print $1}')"
+      ecmd="$(echo "$line" | awk '{$1=""; sub(/^ /,""); print}')"
+      [[ "$first" == true ]] && first=false || printf ','
+      printf '\n    {"pid": %s, "command": "%s"}' "$epid" "$(json_escape "$ecmd")"
+    done <<< "$PREFLIGHT_EXCLUDED"
+    printf '\n  '
+  fi
+  printf '],\n'
+
+  # Caffeinate pids
+  printf '  "caffeinate_pids": ['
+  first=true
+  local caff_pids
+  caff_pids="$(pgrep caffeinate 2>/dev/null || true)"
+  if [[ -n "$caff_pids" ]]; then
+    while IFS= read -r pid; do
+      [[ "$first" == true ]] && first=false || printf ', '
+      printf '%s' "$pid"
+    done <<< "$caff_pids"
+  fi
+  printf '],\n'
+
+  # Assertions
+  printf '  "assertions": ['
+  first=true
+  for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
+    IFS='|' read -r sev pid name type <<< "$entry"
+    [[ "$first" == true ]] && first=false || printf ','
+    printf '\n    {"severity": "%s", "pid": %s, "name": "%s", "type": "%s"}' \
+      "$sev" "$pid" "$(json_escape "$name")" "$(json_escape "$type")"
+  done
+  [[ "$first" == false ]] && printf '\n  '
+  printf '],\n'
+
+  # Blockers
+  printf '  "blockers": ['
+  first=true
+  for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+    IFS='|' read -r pid name type <<< "$entry"
+    [[ "$first" == true ]] && first=false || printf ','
+    printf '\n    {"pid": %s, "name": "%s", "type": "%s"}' \
+      "$pid" "$(json_escape "$name")" "$(json_escape "$type")"
+  done
+  [[ "$first" == false ]] && printf '\n  '
+  printf '],\n'
+
+  # Power + verdict
+  local lid_display="unknown"
+  case "$PREFLIGHT_LID" in Yes) lid_display="closed" ;; No) lid_display="open" ;; esac
+
+  printf '  "power": {\n'
+  printf '    "battery_percent": "%s",\n'   "$(json_escape "$PREFLIGHT_BATTERY_PCT")"
+  printf '    "battery_source": "%s",\n'    "$(json_escape "$PREFLIGHT_BATTERY_SRC")"
+  printf '    "system_sleep_min": "%s",\n'  "$(json_escape "${PREFLIGHT_SLEEP_MIN:-?}")"
+  printf '    "display_sleep_min": "%s",\n' "$(json_escape "${PREFLIGHT_DISPLAYSLEEP_MIN:-?}")"
+  printf '    "hibernate_mode": "%s",\n'    "$(json_escape "${PREFLIGHT_HIBERNATE_MODE:-?}")"
+  printf '    "lid": "%s"\n'                "$(json_escape "$lid_display")"
+  printf '  },\n'
+  printf '  "can_sleep": %s,\n' "$([[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]] && echo true || echo false)"
+  printf '  "blocker_count": %d\n' "${#PREFLIGHT_BLOCKERS[@]}"
+  printf '}\n'
+}
+
+prompt_confirm() {
+  local prompt="$1"
+  local response
+  printf "  %b " "$prompt"
+  read -r response
+  case "$response" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print blockers detected after watch (wrapped in function for scope hygiene)
+print_post_watch_blockers() {
+  local entry pid name type
+  echo ""
+  print_warn "${#PREFLIGHT_BLOCKERS[@]} sleep blocker(s) detected AFTER watch finished:"
+  for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
+    IFS='|' read -r pid name type <<< "$entry"
+    echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${type}"
+  done
+  print_step "Sleep may not succeed. Releasing caffeinate anyway."
+  log_event "POST_WATCH_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
+}
+
+# ── Argument parsing ──────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --timeout|-t)
+      if [[ -z "${2:-}" ]] || ! is_positive_integer "$2"; then
+        echo -e "${RED}✖  --timeout requires a positive integer ≥ 1 (hours)${RESET}" >&2
+        exit 1
+      fi
+      TIMEOUT_HOURS="$2"; shift 2 ;;
+    --pid|-p)
+      if [[ -z "${2:-}" ]] || ! is_integer "$2"; then
+        echo -e "${RED}✖  --pid requires a numeric process ID${RESET}" >&2
+        exit 1
+      fi
+      TARGET_PID="$2"; TARGET_PID_EXPLICIT=true; shift 2 ;;
+    --delay|-d)
+      if [[ -z "${2:-}" ]] || ! is_integer "$2"; then
+        echo -e "${RED}✖  --delay requires a non-negative integer (seconds)${RESET}" >&2
+        exit 1
+      fi
+      DELAY_SECS="$2"; shift 2 ;;
+    --log-file)
+      if [[ -z "${2:-}" ]]; then
+        echo -e "${RED}✖  --log-file requires a path${RESET}" >&2
+        exit 1
+      fi
+      LOG_FILE="$2"; LOG_ENABLED=true; shift 2 ;;
+    --no-sound)          NO_SOUND=true;         shift ;;
+    --caffeinate-only)   CAFFEINATE_ONLY=true;  shift ;;
+    --dry-run)           DRY_RUN=true;          shift ;;
+    --list|-l)           LIST_MODE=true;        shift ;;
+    --notify|-n)         NOTIFY=true;           shift ;;
+    --log)               LOG_ENABLED=true;      shift ;;
+    --wait-for-start)    WAIT_FOR_START=true;   shift ;;
+    --preflight|-P)      PREFLIGHT_ONLY=true;   shift ;;
+    --no-preflight)      SKIP_PREFLIGHT=true;   shift ;;
+    --force|--yes|-f|-y) FORCE=true;            shift ;;
+    --brief|-b)          BRIEF=true;            shift ;;
+    --json)              JSON_OUTPUT=true;      shift ;;
+    --help|-h)
+      echo ""
+      echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
+      echo ""
+      echo -e "  ${DIM}Usage:${RESET}"
+      echo -e "    sleep-after-claude [options]"
+      echo ""
+      echo -e "  ${DIM}Watch options:${RESET}"
+      echo -e "    --pid, -p <pid>       Watch a specific PID (default: auto-detect)"
+      echo -e "    --timeout, -t <hrs>   Force sleep after N hours, min 1 (default: 6)"
+      echo -e "    --delay, -d <secs>    Grace period before sleeping (default: 1)"
+      echo -e "    --wait-for-start      Poll until a Claude process appears"
+      echo ""
+      echo -e "  ${DIM}Mode options:${RESET}"
+      echo -e "    --caffeinate-only     Release caffeinate but don't sleep the Mac"
+      echo -e "    --dry-run             Simulate — detect and wait, but don't sleep"
+      echo -e "    --list, -l            Show detectable Claude processes and exit"
+      echo -e "    --preflight, -P       Run pre-flight scan only, then exit"
+      echo -e "    --no-preflight        Skip pre-flight scan entirely"
+      echo -e "    --force, -f           Skip confirmation prompts"
+      echo ""
+      echo -e "  ${DIM}Output options:${RESET}"
+      echo -e "    --brief, -b           Show only the verdict in preflight output"
+      echo -e "    --json                Emit preflight as JSON (for automation)"
+      echo -e "    --no-sound            Skip the completion sound"
+      echo -e "    --notify, -n          Send a macOS notification on completion"
+      echo -e "    --log                 Append completion events to the log file"
+      echo -e "    --log-file <path>     Custom log file (implies --log)"
+      echo -e "    --help, -h            Show this help"
+      echo ""
+      echo -e "  ${DIM}Default log:${RESET} ~/.local/state/sleep-after-claude.log"
+      echo ""
+      exit 0 ;;
+    *)
+      echo -e "${RED}✖  Unknown argument: $1${RESET}" >&2
+      exit 1 ;;
+  esac
+done
+
+# ── Open persistent FIFO FD for fork-free micro_sleep ─────────
+if [[ "$USE_BUILTIN_SLEEP" == true ]]; then
+  if FIFO_DIR="$(mktemp -d -t sleep-after-claude.XXXXXX 2>/dev/null)"; then
+    FIFO_PATH="$FIFO_DIR/fifo"
+    if mkfifo "$FIFO_PATH" 2>/dev/null && exec 9<>"$FIFO_PATH"; then
+      :
+    else
+      rm -rf "$FIFO_DIR" 2>/dev/null || true
+      FIFO_DIR=""
+      USE_BUILTIN_SLEEP=false
+    fi
+  else
+    USE_BUILTIN_SLEEP=false
+  fi
+fi
+
+# ── Cleanup ───────────────────────────────────────────────────
+WATCH_STARTED=false
+cleanup_fd_and_tmp() {
+  [[ "$USE_BUILTIN_SLEEP" == true ]] && exec 9<&- 2>/dev/null || true
+  [[ -n "$FIFO_DIR" && -d "$FIFO_DIR" ]] && rm -rf "$FIFO_DIR" 2>/dev/null || true
+}
+
+on_interrupt() {
+  clear_line
+  echo ""
+  if [[ "$WATCH_STARTED" == true ]]; then
+    print_warn "Cancelled — machine will ${BOLD}not${RESET} sleep. Claude is still running."
+    log_event "CANCELLED while watching PID ${TARGET_PID:-unknown}"
+  else
+    print_warn "Cancelled."
+  fi
+  cleanup_fd_and_tmp
+  echo ""
+  exit 0
+}
+trap on_interrupt INT TERM HUP
+trap cleanup_fd_and_tmp EXIT
+
+# ── --list mode ───────────────────────────────────────────────
+if [[ "$LIST_MODE" == true ]]; then
+  print_header
+  list_matches="$(find_claude_processes)"
+  list_all="$(find_all_claude_processes_raw)"
+  list_target_pids=""
+  [[ -n "$list_matches" ]] && list_target_pids="$(echo "$list_matches" | awk '{print $1}' | sort -u)"
+
+  list_excluded=""
+  if [[ -n "$list_all" ]]; then
+    while IFS= read -r line; do
+      pid="$(echo "$line" | awk '{print $1}')"
+      if ! echo "$list_target_pids" | grep -qx "$pid"; then
+        list_excluded+="${line}"$'\n'
+      fi
+    done <<< "$list_all"
+    list_excluded="${list_excluded%$'\n'}"
+  fi
+
+  if [[ -z "$list_matches" ]]; then
+    print_warn "No target Claude processes detected."
+  else
+    print_step "Target Claude process(es):"
+    echo ""
+    echo "$list_matches" | while IFS= read -r line; do
+      echo -e "    ${GREEN}✔${RESET} ${line}"
+    done
+  fi
+  if [[ -n "$list_excluded" ]]; then
+    echo ""
+    print_step "Excluded (not watched):"
+    echo ""
+    echo "$list_excluded" | while IFS= read -r line; do
+      epid="$(echo "$line" | awk '{print $1}')"
+      ecmd="$(echo "$line" | awk '{$1=""; sub(/^ /,""); print}' | cut -c1-65)"
+      echo -e "    ${YELLOW}⊘${RESET} ${DIM}PID $epid  ${ecmd}${RESET}"
+    done
+  fi
+  if [[ -n "$list_matches" ]]; then
+    echo ""
+    print_step "Use ${BOLD}--pid <pid>${RESET} to watch a specific one."
+  fi
+  echo ""
+  exit 0
+fi
+
+# ── --preflight mode ──────────────────────────────────────────
+if [[ "$PREFLIGHT_ONLY" == true ]]; then
+  preflight_scan
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    render_preflight_json
+  else
+    [[ "$BRIEF" == false ]] && print_header
+    render_preflight
+  fi
+  exit 0
+fi
+
+# ── Detect Claude PID ─────────────────────────────────────────
+print_header
+
+if [[ -z "$TARGET_PID" ]]; then
+  MATCHES="$(find_claude_processes)"
+
+  if [[ -z "$MATCHES" && "$WAIT_FOR_START" == true ]]; then
+    print_step "Waiting for Claude to start..."
+    while [[ -z "$MATCHES" ]]; do
+      sleep 2
+      MATCHES="$(find_claude_processes)"
+    done
+    print_ok "Claude detected."
+  fi
+
+  if [[ -z "$MATCHES" ]]; then
+    print_error "No Claude process found. Is Claude Code running?"
+    print_step  "Run ${BOLD}sleep-after-claude --list${RESET} to check what's detectable."
+    print_step  "Or use ${BOLD}--wait-for-start${RESET} to wait for Claude to launch."
+    exit 1
+  fi
+
+  MATCH_COUNT="$(echo "$MATCHES" | wc -l | tr -d ' ')"
+  TARGET_PID="$(echo "$MATCHES" | awk 'NR==1{print $1}')"
+  TARGET_CMD="$(echo "$MATCHES" | awk 'NR==1{$1=""; sub(/^ /, ""); print}' | cut -c1-55)"
+
+  if [[ "$MATCH_COUNT" -gt 1 ]]; then
+    print_warn "Multiple Claude processes found — watching the first one:"
+    echo ""
+    echo "$MATCHES" | while IFS= read -r line; do
+      echo -e "    ${DIM}$line${RESET}"
+    done
+    echo ""
+    print_step "Use ${BOLD}--pid <pid>${RESET} to watch a specific one."
+    echo ""
+  fi
+
+  print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
+
+else
+  if ! kill -0 "$TARGET_PID" 2>/dev/null; then
+    print_error "PID $TARGET_PID not found or already exited."
+    exit 1
+  fi
+  TARGET_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null | cut -c1-55 || echo "unknown")"
+  print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
+fi
+
+TARGET_CMD_FULL="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
+
+# ── Pre-flight scan + verdict + optional confirmation ─────────
+if [[ "$SKIP_PREFLIGHT" == false ]]; then
+  preflight_scan
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    render_preflight_json
+  else
+    render_preflight
+  fi
+
+  if [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
+    log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
+    if [[ "$FORCE" == false ]]; then
+      if [[ "$STDIN_IS_TTY" == true ]]; then
+        if ! prompt_confirm "${BOLD}Proceed anyway?${RESET} [y/N]:"; then
+          print_warn "Aborted by user. Claude is still running; caffeinate untouched."
+          echo ""
+          exit 0
+        fi
+        echo ""
+      else
+        print_error "Sleep blockers detected and stdin is not a TTY for confirmation."
+        print_step  "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+        exit 1
+      fi
+    else
+      print_warn "${#PREFLIGHT_BLOCKERS[@]} blocker(s) detected but --force was given — proceeding."
+      echo ""
+    fi
+  fi
+fi
+
+# ── Capture caffeinate PIDs at start ──────────────────────────
+# shellcheck disable=SC2207
+INITIAL_CAFF_PIDS=( $(pgrep caffeinate 2>/dev/null || true) )
+
+TIMEOUT_SECS=$(( TIMEOUT_HOURS * 3600 ))
+
+echo -e "  ${BOLD}Starting watch${RESET}"
+echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+print_step "Timeout:  ${BOLD}${TIMEOUT_HOURS}h${RESET}"
+print_step "Delay:    ${BOLD}${DELAY_SECS}s${RESET} before sleep"
+if [[ ${#INITIAL_CAFF_PIDS[@]} -gt 0 ]]; then
+  print_step "Caffeinate PIDs captured: ${BOLD}${INITIAL_CAFF_PIDS[*]}${RESET}"
+else
+  print_warn "No caffeinate processes currently running"
+fi
+[[ "$CAFFEINATE_ONLY" == true ]] && print_step "Mode:     ${BOLD}caffeinate-only${RESET} (will not sleep the Mac)"
+[[ "$DRY_RUN" == true ]]         && print_step "Mode:     ${BOLD}dry-run${RESET} (will not sleep the Mac)"
+[[ "$NO_SOUND" == true ]]        && print_step "Sound:    ${BOLD}off${RESET}"
+[[ "$NOTIFY" == true ]]          && print_step "Notify:   ${BOLD}on${RESET}"
+[[ "$LOG_ENABLED" == true ]]     && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
+[[ "$USE_SPINNER" == false ]]    && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
+print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
+echo ""
+
+log_event "WATCH_START pid=$TARGET_PID cmd=\"$TARGET_CMD\""
+
+# ── Wait loop ─────────────────────────────────────────────────
+WATCH_STARTED=true
+START_TIME=$(date +%s)
+FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+TICK=0
+TICK_COUNT=0
+ELAPSED=0
+LAST_STATUS_LOG=0
+TIMED_OUT=false
+PID_REUSED=false
+
+while kill -0 "$TARGET_PID" 2>/dev/null; do
+  if (( TICK_COUNT % 10 == 0 )); then
+    NOW=$(date +%s)
+    ELAPSED=$(( NOW - START_TIME ))
+  fi
+
+  if [[ -n "$TARGET_CMD_FULL" ]] && (( TICK_COUNT % 300 == 0 )) && (( TICK_COUNT > 0 )); then
+    CURRENT_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
+    if [[ -n "$CURRENT_CMD" && "$CURRENT_CMD" != "$TARGET_CMD_FULL" ]]; then
+      clear_line
+      print_warn "PID $TARGET_PID was reused by another process — treating as finished."
+      log_event "PID_REUSED pid=$TARGET_PID was=\"$TARGET_CMD_FULL\" now=\"$CURRENT_CMD\""
+      PID_REUSED=true
+      break
+    fi
+  fi
+
+  if [[ $ELAPSED -ge $TIMEOUT_SECS ]]; then
+    clear_line
+    print_warn "Timeout of ${TIMEOUT_HOURS}h reached — forcing sleep anyway."
+    TIMED_OUT=true
+    break
+  fi
+
+  if [[ "$USE_SPINNER" == true ]]; then
+    printf "\r  ${CYAN}${FRAMES[$TICK]}${RESET}  ${DIM}Waiting for PID $TARGET_PID… %s elapsed${RESET}" \
+      "$(elapsed_label $ELAPSED)"
+  else
+    if (( ELAPSED - LAST_STATUS_LOG >= 300 )); then
+      echo "  … still waiting for PID $TARGET_PID ($(elapsed_label $ELAPSED) elapsed)"
+      LAST_STATUS_LOG=$ELAPSED
+    fi
+  fi
+
+  TICK=$(( (TICK + 1) % ${#FRAMES[@]} ))
+  TICK_COUNT=$(( TICK_COUNT + 1 ))
+  micro_sleep 0.1
+done
+
+clear_line
+WATCH_STARTED=false
+
+if [[ "$TIMED_OUT" == false && "$PID_REUSED" == false ]]; then
+  TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
+  print_ok "Process ${BOLD}PID $TARGET_PID${RESET} finished after $(elapsed_label $TOTAL_ELAPSED)"
+  log_event "CLAUDE_FINISHED pid=$TARGET_PID elapsed=${TOTAL_ELAPSED}s"
+  notify_macos "Claude finished after $(elapsed_label $TOTAL_ELAPSED)"
+elif [[ "$TIMED_OUT" == true ]]; then
+  log_event "TIMEOUT pid=$TARGET_PID after ${TIMEOUT_HOURS}h"
+  notify_macos "Claude timeout reached — forcing sleep"
+else
+  notify_macos "Claude PID reused — proceeding with sleep"
+fi
+
+# ── Re-scan assertions only (lightweight, no full rescan needed) ──
+if [[ "$SKIP_PREFLIGHT" == false ]]; then
+  scan_assertions
+  if [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
+    print_post_watch_blockers
+  fi
+fi
+
+# ── Release caffeinate ────────────────────────────────────────
+echo ""
+print_step "Releasing caffeinate..."
+
+if [[ ${#INITIAL_CAFF_PIDS[@]} -eq 0 ]]; then
+  print_warn "No captured caffeinate PIDs — nothing to release"
+else
+  ALIVE_PIDS=()
+  for pid in "${INITIAL_CAFF_PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null && ALIVE_PIDS+=("$pid")
+  done
+
+  if [[ ${#ALIVE_PIDS[@]} -eq 0 ]]; then
+    print_warn "Captured caffeinate PIDs already exited — nothing to do"
+  else
+    kill "${ALIVE_PIDS[@]}" 2>/dev/null || true
+    sleep 0.3
+
+    STUCK_PIDS=()
+    for pid in "${ALIVE_PIDS[@]}"; do
+      kill -0 "$pid" 2>/dev/null && STUCK_PIDS+=("$pid")
+    done
+
+    if [[ ${#STUCK_PIDS[@]} -eq 0 ]]; then
+      print_ok "caffeinate stopped (${#ALIVE_PIDS[@]} process(es): ${ALIVE_PIDS[*]})"
+    elif kill -9 "${STUCK_PIDS[@]}" 2>/dev/null; then
+      print_warn "caffeinate force-killed with SIGKILL: ${STUCK_PIDS[*]}"
+      log_event "CAFFEINATE_SIGKILL pids=${STUCK_PIDS[*]}"
+    else
+      print_warn "Could not kill caffeinate PIDs ${STUCK_PIDS[*]} — try: sudo kill -9 ${STUCK_PIDS[*]}"
+      log_event "CAFFEINATE_KILL_FAILED pids=${STUCK_PIDS[*]}"
+    fi
+  fi
+fi
+
+# ── Early exits ───────────────────────────────────────────────
+echo ""
+
+if [[ "$DRY_RUN" == true ]]; then
+  print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
+  play_sound
+  log_event "DRY_RUN_EXIT"
+  exit 0
+fi
+
+if [[ "$CAFFEINATE_ONLY" == true ]]; then
+  print_done "Caffeinate released. Mac will sleep on its own idle timer."
+  play_sound
+  log_event "CAFFEINATE_ONLY_EXIT"
+  exit 0
+fi
+
+# ── Sleep the Mac ─────────────────────────────────────────────
+print_step "Sleeping Mac in ${BOLD}${DELAY_SECS}s${RESET}..."
+play_sound
+sleep "$DELAY_SECS"
+
+echo ""
+echo -e "  ${BOLD}${GREEN}Good night 🌙${RESET}"
+echo ""
+log_event "SLEEP_ATTEMPT"
+
+if pmset sleepnow 2>/dev/null; then
+  exit 0
+elif osascript -e 'tell application "System Events" to sleep' 2>/dev/null; then
+  exit 0
+else
+  print_error "Could not trigger sleep automatically."
+  print_warn  "Run manually: ${BOLD}pmset sleepnow${RESET}"
+  log_event   "SLEEP_FAILED"
+  exit 1
+fi
