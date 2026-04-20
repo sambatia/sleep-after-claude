@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new behavior, flag, or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing a new flag, check whether an existing flag covers your case. The tool is already at the complexity ceiling for a single-file bash utility, so the bar for new surface is high.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the concrete user-facing scenario, not the implementation. "My Mac stays awake when X" is better than "add a Y flag."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What would ideally happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds, existing flags, or other tools.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This is a macOS-only feature (the project is macOS-only by design).
+          required: true
+        - label: This does not require a new runtime dependency beyond what's already in goodnight (bash, pmset, pgrep, ps, caffeinate, curl, optional jq).

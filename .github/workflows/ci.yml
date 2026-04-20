@@ -1,0 +1,92 @@
+name: CI
+
+# Runs on every PR to main and every push to main.
+# The project is macOS-only (the script guards on `uname == Darwin`),
+# so all jobs run on a macos-* runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (shellcheck + shfmt + syntax)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck + shfmt
+        run: |
+          brew update >/dev/null
+          brew install shellcheck shfmt
+
+      - name: bash -n (syntax check)
+        run: |
+          bash -n sleep-after-claude
+          bash -n install-sleep-after-claude.sh
+          bash -n scripts/check-parity.sh
+          bash -n .githooks/pre-commit
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning \
+            sleep-after-claude \
+            install-sleep-after-claude.sh \
+            scripts/check-parity.sh \
+            .githooks/pre-commit \
+            tests/lib/common.bash
+
+      - name: shfmt (must be formatted with -i 2 -ci)
+        run: |
+          shfmt -d -i 2 -ci \
+            sleep-after-claude \
+            install-sleep-after-claude.sh \
+            scripts/check-parity.sh \
+            .githooks/pre-commit \
+            tests/lib/common.bash
+
+  parity:
+    name: Parity (installer payload ↔ standalone)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run parity check
+        run: bash scripts/check-parity.sh
+
+  tests:
+    name: bats regression suite
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats-core + jq + modern bash
+        # `jq` + homebrew's bash 5.x are required for several tests that
+        # source functions via process substitution and use jq in
+        # assertions. The stock /usr/bin/bash 3.2 + no-jq macos-latest
+        # runner fails 7/118 without these.
+        run: |
+          brew update >/dev/null
+          brew install bats-core jq bash
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Test count (sanity)
+        run: bats tests/ --count
+
+      - name: Run full bats suite
+        # The tests use PATH-shimmed pmset/curl/jq and file:// URLs; they
+        # should run fully offline and not touch real system state.
+        run: bats tests/

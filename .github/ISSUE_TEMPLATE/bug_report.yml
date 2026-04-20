@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in goodnight isn't working as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much as you can — incomplete reports usually get closed without action.
+
+        **Security issues:** do **not** use this template. See [SECURITY.md](../../SECURITY.md).
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`
+      placeholder: "14.5"
+    validations:
+      required: true
+  - type: input
+    id: bash-version
+    attributes:
+      label: Bash version
+      description: Output of `bash --version` (first line only)
+      placeholder: "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin...)"
+    validations:
+      required: true
+  - type: input
+    id: goodnight-version
+    attributes:
+      label: goodnight commit / version
+      description: Output of `shasum -a 256 $(which sleep-after-claude)` (first 12 chars is fine) or the commit SHA you pinned to
+      placeholder: "abc123def456 or main @ 2026-04-20"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command you ran
+      render: shell
+      placeholder: "goodnight --smart --log"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the full terminal output if possible.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log lines (if any)
+      description: Tail of `~/.local/state/sleep-after-claude.log` if you were running with `--log`.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked that this isn't already reported in open or closed issues.
+          required: true
+        - label: My report does NOT contain secrets, tokens, or other sensitive data.
+          required: true
