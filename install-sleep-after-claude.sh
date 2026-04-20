@@ -2249,6 +2249,52 @@ WATCH_STARTED=false
 cleanup_fd_and_tmp() {
   [[ "$USE_BUILTIN_SLEEP" == true ]] && exec 9<&- 2>/dev/null || true
   [[ -n "$FIFO_DIR" && -d "$FIFO_DIR" ]] && rm -rf "$FIFO_DIR" 2>/dev/null || true
+  # F-07: release the watch lock on any exit path.
+  release_goodnight_lock
+}
+
+# F-07: Mutual-exclusion lock to prevent two concurrent `goodnight`
+# invocations from racing on caffeinate release and double-pmset.
+# macOS bash doesn't ship flock; `mkdir` is atomic across processes
+# so we use the directory-as-lock pattern. Stale-lock detection: if
+# the PID in the lock's marker file is no longer alive, the lock is
+# reclaimed (prevents permanent deadlock after a crash).
+GOODNIGHT_LOCK_DIR="${HOME}/.local/state/goodnight/lock"
+GOODNIGHT_LOCK_ACQUIRED=false
+
+acquire_goodnight_lock() {
+  mkdir -p "$(dirname "$GOODNIGHT_LOCK_DIR")" 2>/dev/null || true
+  # First attempt
+  if mkdir "$GOODNIGHT_LOCK_DIR" 2>/dev/null; then
+    echo "$$" >"$GOODNIGHT_LOCK_DIR/pid"
+    GOODNIGHT_LOCK_ACQUIRED=true
+    return 0
+  fi
+  # Lock taken — check liveness of the holder.
+  local holder_pid
+  holder_pid="$(cat "$GOODNIGHT_LOCK_DIR/pid" 2>/dev/null || echo "")"
+  if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then
+    print_error "Another goodnight is already running (PID $holder_pid)."
+    print_step "Wait for it to finish, or cancel it first with: ${BOLD}kill $holder_pid${RESET}"
+    return 1
+  fi
+  # Stale lock — steal it.
+  print_warn "Stale lock at $GOODNIGHT_LOCK_DIR (holder PID $holder_pid dead) — reclaiming."
+  rm -rf "$GOODNIGHT_LOCK_DIR" 2>/dev/null || true
+  if mkdir "$GOODNIGHT_LOCK_DIR" 2>/dev/null; then
+    echo "$$" >"$GOODNIGHT_LOCK_DIR/pid"
+    GOODNIGHT_LOCK_ACQUIRED=true
+    return 0
+  fi
+  print_error "Could not acquire goodnight lock."
+  return 1
+}
+
+release_goodnight_lock() {
+  if [[ "$GOODNIGHT_LOCK_ACQUIRED" == true ]] && [[ -d "$GOODNIGHT_LOCK_DIR" ]]; then
+    rm -rf "$GOODNIGHT_LOCK_DIR" 2>/dev/null || true
+    GOODNIGHT_LOCK_ACQUIRED=false
+  fi
 }
 
 on_interrupt() {
@@ -2508,6 +2554,11 @@ if [[ "$SMART_WATCH" == true ]]; then
   print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
   echo ""
 
+  # F-07: Acquire the watch lock to prevent concurrent goodnight
+  # instances from racing on caffeinate release and pmset sleepnow.
+  if ! acquire_goodnight_lock; then
+    exit 1
+  fi
   log_event "SMART_WATCH_START busy_count=$(count_busy_sessions)"
   WATCH_STARTED=true
   smart_watch_loop
@@ -2658,6 +2709,14 @@ if [[ "${SMART_WATCH_DONE:-false}" != true ]] && ! hooks_installed; then
 fi
 echo ""
 
+# F-07: Acquire the watch lock (if smart-mode didn't already — it's
+# idempotent). Prevents concurrent invocations racing on caffeinate
+# and pmset.
+if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
+  if ! acquire_goodnight_lock; then
+    exit 1
+  fi
+fi
 log_event "WATCH_START pid=$TARGET_PID cmd=\"$TARGET_CMD\""
 
 # ── Wait loop ─────────────────────────────────────────────────
