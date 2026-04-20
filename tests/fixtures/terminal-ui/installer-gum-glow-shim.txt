@@ -1,0 +1,20 @@
+
+GUM_STYLE|--foreground|39|--bold|--|sleep-after-claude installer
+GUM_STYLE_TEXT|sleep-after-claude installer
+GUM_STYLE|--foreground|245|--|Installs goodnight, jq support, and Claude Code idle hooks.
+GUM_STYLE_TEXT|Installs goodnight, jq support, and Claude Code idle hooks.
+GUM_STYLE|--foreground|240|--|────────────────────────────────────────────
+GUM_STYLE_TEXT|────────────────────────────────────────────
+
+GUM_STYLE|--border|rounded|--border-foreground|46|--padding|1 2|--margin|1 0|--|GUM_STYLE|--foreground|46|--bold|--|Installer ready
+GUM_STYLE_TEXT|Installer ready||GUM_STYLE
+GUM_STYLE_STDIN|goodnight is installed.
+GUM_STYLE_TEXT|GUM_STYLE|--foreground|46|--bold|--|Installer ready\nGUM_STYLE_TEXT|Installer ready
+GUM_STYLE_TEXT|
+GUM_STYLE_TEXT|GUM_STYLE\nGUM_STYLE_STDIN|goodnight is installed.
+GUM_SPIN|--spinner|minidot|--title|Running quick verification|--show-output|--
+verified
+GLOW|-
+GLOW_LINE|# Installation complete 🌙
+GLOW_LINE|
+GLOW_LINE|Run `goodnight --help`.

@@ -35,8 +35,11 @@
 
 set -uo pipefail
 
+INSTALLER_STDOUT_IS_TTY=false
+[[ -t 1 ]] && INSTALLER_STDOUT_IS_TTY=true
+
 # ── Colours (TTY only) ────────────────────────────────────────────
-if [[ -t 1 ]]; then
+if [[ "$INSTALLER_STDOUT_IS_TTY" == true ]]; then
   # $'...' so vars contain real ESC bytes — robust to printf %s and
   # plain echo without -e.
   C_RESET=$'\033[0m'
@@ -58,16 +61,127 @@ else
   C_BLUE=""
 fi
 
+# ── Terminal UI layer ─────────────────────────────────────────────
+# The installer can be run as `curl | bash`, from a local file, or
+# inside CI. gum/glow are optional: when present in a real terminal we
+# use them for spinners, panels, and markdown summaries; otherwise the
+# same messages render as plain, readable Bash output.
+have_gum() {
+  [[ "${SAC_NO_GUM:-}" != "1" ]] || return 1
+  [[ "$INSTALLER_STDOUT_IS_TTY" == true ]] || return 1
+  if [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]] && [[ "${SAC_FORCE_GUM:-}" != "1" ]]; then
+    return 1
+  fi
+  command -v gum >/dev/null 2>&1
+}
+
+have_glow() {
+  [[ "${SAC_NO_GLOW:-}" != "1" ]] || return 1
+  [[ "$INSTALLER_STDOUT_IS_TTY" == true ]] || return 1
+  command -v glow >/dev/null 2>&1
+}
+
+ui_markdown() {
+  if have_glow; then
+    glow -
+  else
+    cat
+  fi
+}
+
+ui_header() {
+  echo ""
+  if have_gum; then
+    gum style --foreground 39 --bold -- "sleep-after-claude installer"
+    gum style --foreground 245 -- "Installs goodnight, jq support, and Claude Code idle hooks."
+    gum style --foreground 240 -- "────────────────────────────────────────────"
+  else
+    echo -e "  ${C_BOLD}${C_BLUE}sleep-after-claude installer${C_RESET}"
+    echo -e "  ${C_DIM}Installs goodnight, jq support, and Claude Code idle hooks.${C_RESET}"
+    echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
+  fi
+  echo ""
+}
+
+ui_spin() {
+  local title="$1"
+  shift
+  [[ "${1:-}" == "--" ]] && shift
+  if have_gum; then
+    gum spin --spinner minidot --title "$title" --show-output -- "$@"
+    return $?
+  fi
+  say "$title"
+  "$@"
+}
+
+ui_panel() {
+  local kind="$1"
+  shift
+  local title="$1"
+  shift
+  local -a lines=("$@")
+  if have_gum; then
+    local fg border
+    case "$kind" in
+      success)
+        fg=46
+        border=46
+        ;;
+      warning)
+        fg=214
+        border=214
+        ;;
+      danger)
+        fg=196
+        border=196
+        ;;
+      *)
+        fg=39
+        border=39
+        ;;
+    esac
+    local title_block content_block
+    title_block="$(gum style --foreground "$fg" --bold -- "$title")"
+    content_block="$(printf '%s\n' "${lines[@]}" | gum style)"
+    gum style \
+      --border rounded \
+      --border-foreground "$border" \
+      --padding "1 2" \
+      --margin "1 0" \
+      -- "$title_block" "" "$content_block"
+    return
+  fi
+
+  local color="$C_BLUE"
+  case "$kind" in
+    success) color="$C_GREEN" ;;
+    warning) color="$C_YELLOW" ;;
+    danger) color="$C_RED" ;;
+  esac
+  echo ""
+  echo -e "  ${C_BOLD}${color}${title}${C_RESET}"
+  echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
+  local line
+  for line in "${lines[@]}"; do
+    [[ -z "$line" ]] && echo "" || echo -e "  ${line}"
+  done
+  echo ""
+}
+
 say() { echo -e "  ${C_CYAN}›${C_RESET} $1"; }
 ok() { echo -e "  ${C_GREEN}✔${C_RESET} $1"; }
 warn() { echo -e "  ${C_YELLOW}⚠${C_RESET}  $1"; }
-fail() { echo -e "  ${C_RED}✖${C_RESET} $1" >&2; }
+fail() {
+  if have_gum; then
+    ui_panel danger "Installer error" "$1" >&2
+  else
+    echo -e "  ${C_RED}✖${C_RESET} $1" >&2
+  fi
+}
 
 # ── Header ────────────────────────────────────────────────────────
-echo ""
-echo -e "  ${C_BOLD}${C_BLUE}sleep-after-claude installer${C_RESET}"
-echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
-echo ""
+ui_header
 
 # ── 1. macOS check ────────────────────────────────────────────────
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -97,9 +211,6 @@ if [[ -f "$TARGET" ]]; then
   ok "Previous version backed up to ~/bin/sleep-after-claude.bak"
 fi
 
-# ── 5. Extract embedded script ────────────────────────────────────
-say "Extracting sleep-after-claude to ~/bin/..."
-
 # When run as `curl ... | bash`, BASH_SOURCE[0] and $0 are "bash" (not a file),
 # so awk can't read the installer. In that case, re-download it to a temp file.
 # The re-download is a second trust hop: we warn the user, sanity-check the
@@ -112,9 +223,8 @@ if [[ ! -f "$SELF" ]]; then
   # not an error). Advanced users wanting SHA-256 provenance can find
   # the env-var recipe in the README; we don't surface it here because
   # it's noise for the 99% non-technical install flow.
-  say "Fetching installer payload from $SOURCE_URL"
   TMP_SELF="$(mktemp -t sleep-after-claude-installer.XXXXXX)"
-  if ! curl -fsSL "$SOURCE_URL" -o "$TMP_SELF"; then
+  if ! ui_spin "Fetching installer payload from $SOURCE_URL" -- curl -fsSL "$SOURCE_URL" -o "$TMP_SELF"; then
     fail "Could not re-download installer from $SOURCE_URL"
     rm -f "$TMP_SELF"
     exit 1
@@ -154,7 +264,13 @@ if [[ ! -f "$SELF" ]]; then
   SELF="$TMP_SELF"
 fi
 
-awk '/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag' "$SELF" >"$TARGET"
+if ! ui_spin "Extracting sleep-after-claude to ~/bin" -- bash -c \
+  'awk '\''/^__SCRIPT_START__$/{flag=1; next} /^__SCRIPT_END__$/{flag=0} flag'\'' "$1" >"$2"' \
+  _ "$SELF" "$TARGET"; then
+  fail "Extraction failed — installer file may be corrupted."
+  [[ -n "$TMP_SELF" ]] && rm -f "$TMP_SELF"
+  exit 1
+fi
 
 [[ -n "$TMP_SELF" ]] && rm -f "$TMP_SELF"
 
@@ -167,7 +283,7 @@ chmod +x "$TARGET"
 ok "Extracted $(wc -l <"$TARGET" | tr -d ' ') lines to ~/bin/sleep-after-claude"
 
 # ── 6. Syntax-check the extracted script ──────────────────────────
-if bash -n "$TARGET" 2>/dev/null; then
+if ui_spin "Checking script syntax" -- bash -n "$TARGET"; then
   ok "Script syntax valid"
 else
   fail "Extracted script has syntax errors — aborting."
@@ -301,8 +417,8 @@ ensure_jq() {
   jq_dest="$HOME/bin/jq"
   jq_tmp="$(mktemp -t goodnight-jq.XXXXXX)"
 
-  say "Downloading jq ${jq_version} for macOS (${arch})..."
-  if ! curl -fsSL --max-time 60 -o "$jq_tmp" "$jq_url" 2>/dev/null; then
+  if ! ui_spin "Downloading jq ${jq_version} for macOS (${arch})" -- \
+    curl -fsSL --max-time 60 -o "$jq_tmp" "$jq_url"; then
     warn "Could not download jq from GitHub (offline? firewall?)."
     warn "Install later with: ${C_BOLD}brew install jq${C_RESET}"
     warn "Goodnight will run in --watch-pid mode until then."
@@ -365,8 +481,7 @@ ensure_jq || true
 
 # ── 9. Verification ───────────────────────────────────────────────
 echo ""
-say "Running quick verification..."
-if "$TARGET" --help >/dev/null 2>&1; then
+if ui_spin "Running quick verification" -- bash -c 'TARGET="$1"; "$TARGET" --help >/dev/null 2>&1' _ "$TARGET"; then
   ok "Script executes successfully"
 else
   fail "Script failed to run --help. Try manually: ~/bin/sleep-after-claude --help"
@@ -411,7 +526,7 @@ else
   say "Installing Claude Code hooks into $CLAUDE_SETTINGS..."
   say "(adds two ${C_BOLD}_managed_by: goodnight${C_RESET} entries; existing hooks preserved."
   say " Skip with ${C_BOLD}SAC_SKIP_HOOK_INSTALL=1${C_RESET} and re-run; remove later with ${C_BOLD}goodnight --uninstall-hooks${C_RESET}.)"
-  if "$TARGET" --install-hooks >/tmp/sac-hook-install.log 2>&1; then
+  if ui_spin "Installing Claude Code hooks" -- bash -c '"$1" --install-hooks >"$2" 2>&1' _ "$TARGET" /tmp/sac-hook-install.log; then
     ok "Claude Code hooks installed — default mode is idle-detection."
     say "Restart any running Claude Code sessions so they pick up the new hooks."
   else
@@ -422,20 +537,29 @@ fi
 
 # ── 10. Done ──────────────────────────────────────────────────────
 echo ""
-echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
-echo -e "  ${C_BOLD}${C_GREEN}Installation complete 🌙${C_RESET}"
-echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
-echo ""
-echo -e "  ${C_BOLD}Next step:${C_RESET} open a new Terminal tab, then run:"
-echo ""
-echo -e "    ${C_CYAN}goodnight --help${C_RESET}         # show all options"
-echo -e "    ${C_CYAN}goodnight --preflight${C_RESET}    # audit your system"
-echo -e "    ${C_CYAN}goodnight${C_RESET}                # watch Claude + sleep when done"
-echo ""
-if [[ -n "$RC" ]]; then
-  echo -e "  ${C_DIM}Or, to use in this terminal right now:${C_RESET}"
-  echo -e "    ${C_CYAN}source $RC${C_RESET}"
+{
+  echo "# Installation complete 🌙"
   echo ""
+  echo "goodnight is installed at \`~/bin/sleep-after-claude\` and the \`goodnight\` shortcut is configured."
+  echo ""
+  echo "## Next step"
+  echo ""
+  echo "Open a new Terminal tab, then run:"
+  echo ""
+  echo "\`\`\`bash"
+  echo "goodnight --help       # show all options"
+  echo "goodnight --preflight  # audit your system"
+  echo "goodnight              # watch Claude and sleep when done"
+  echo "\`\`\`"
+} | ui_markdown
+if [[ -n "$RC" ]]; then
+  {
+    echo "To use it in this terminal right now:"
+    echo ""
+    echo "\`\`\`bash"
+    echo "source $RC"
+    echo "\`\`\`"
+  } | ui_markdown
 fi
 
 # ── Drain the rest of the piped installer ────────────────────────
@@ -587,8 +711,15 @@ UPDATE_CACHE_TTL_SECS=86400 # 24h rate-limit on network checks
 # ── Helpers ───────────────────────────────────────────────────
 print_header() {
   echo ""
-  echo -e "  ${BOLD}${BLUE}sleep-after-claude${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  if have_gum; then
+    gum style --foreground 39 --bold -- "sleep-after-claude"
+    gum style --foreground 245 -- "Sleep your Mac when Claude Code finishes."
+    gum style --foreground 240 -- "────────────────────────────────────────────"
+  else
+    echo -e "  ${BOLD}${BLUE}sleep-after-claude${RESET}"
+    echo -e "  ${DIM}Sleep your Mac when Claude Code finishes.${RESET}"
+    echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  fi
 }
 
 print_step() { echo -e "  ${CYAN}›${RESET} $1"; }
@@ -597,7 +728,16 @@ print_warn() { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
 print_error() { echo -e "  ${RED}✖${RESET} $1"; }
 print_done() {
   echo ""
-  echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"
+  if have_gum; then
+    gum style \
+      --border rounded \
+      --border-foreground 46 \
+      --padding "1 2" \
+      --margin "0 0 1 0" \
+      -- "$(gum style --foreground 46 --bold -- "Done")" "$1"
+  else
+    echo -e "  ${BOLD}${GREEN}✔ Done.${RESET} $1"
+  fi
   echo ""
 }
 
@@ -639,6 +779,75 @@ ui_markdown() {
   else
     cat
   fi
+}
+
+# Small terminal design system. All helpers prefer gum when the user is
+# in an interactive terminal, but every component has a plain Bash
+# fallback so CI, pipes, SSH fallbacks, and scripts stay predictable.
+ui_rule() {
+  if have_gum; then
+    gum style --foreground 240 -- "────────────────────────────────────────────"
+  else
+    echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  fi
+}
+
+ui_section() {
+  local title="$1"
+  local subtitle="${2:-}"
+  echo ""
+  if have_gum; then
+    gum style --foreground 141 --bold -- "$title"
+    [[ -n "$subtitle" ]] && gum style --foreground 245 -- "$subtitle"
+    gum style --foreground 240 -- "────────────────────────────────────────────"
+  else
+    echo -e "  ${BOLD}${MAGENTA}${title}${RESET}"
+    [[ -n "$subtitle" ]] && echo -e "  ${DIM}${subtitle}${RESET}"
+    echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  fi
+}
+
+ui_kv() {
+  local label="$1"
+  local value="$2"
+  printf "  %b%-16s%b %s\n" "$DIM" "${label}:" "$RESET" "$value"
+}
+
+ui_table() {
+  local columns="$1"
+  local tmp
+  tmp="$(mktemp -t sac-ui-table.XXXXXX 2>/dev/null)" || return 1
+  cat >"$tmp"
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if have_gum && [[ "${COLUMNS:-100}" -ge 88 ]]; then
+    gum table --print \
+      --separator "," \
+      --columns "$columns" \
+      --border rounded \
+      --border.foreground 240 \
+      --header.foreground 141 \
+      --cell.foreground 252 \
+      <"$tmp"
+    local rc=$?
+    rm -f "$tmp"
+    return "$rc"
+  fi
+
+  local header
+  header="$(printf '%s' "$columns" | tr ',' ' ')"
+  echo -e "  ${BOLD}${header}${RESET}"
+  command awk -F',' '{
+    printf "  "
+    for (i = 1; i <= NF; i++) {
+      printf "%-20s", $i
+    }
+    printf "\n"
+  }' "$tmp"
+  rm -f "$tmp"
 }
 
 # Styled panel: gum-powered rounded box with colored border if gum is
@@ -1203,13 +1412,9 @@ render_preflight() {
     return
   fi
 
-  echo ""
-  echo -e "  ${BOLD}${MAGENTA}Pre-flight scan${RESET}"
-  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
+  ui_section "Pre-flight scan" "Sleep readiness audit before goodnight releases caffeinate."
 
-  echo ""
-  echo -e "  ${BOLD}Claude processes${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Claude processes"
   if [[ -n "$PREFLIGHT_TARGET" ]]; then
     # Label the first match as the active "Target" (what the watch
     # loop will actually follow) and any additional matches as
@@ -1236,9 +1441,7 @@ render_preflight() {
     done
   fi
 
-  echo ""
-  echo -e "  ${BOLD}Caffeinate processes${RESET} ${DIM}(will be released)${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Caffeinate processes" "Captured helpers will be released before sleep."
   if [[ -n "$PREFLIGHT_CAFFEINATE" ]]; then
     echo "$PREFLIGHT_CAFFEINATE" | while IFS= read -r line; do
       echo -e "  ${DIM}${line}${RESET}"
@@ -1247,11 +1450,25 @@ render_preflight() {
     echo -e "  ${DIM}  none running${RESET}"
   fi
 
-  echo ""
-  echo -e "  ${BOLD}Sleep assertions${RESET} ${DIM}(pmset -g assertions)${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Sleep assertions" "Detected with pmset -g assertions."
   if [[ ${#PREFLIGHT_ASSERTIONS[@]} -eq 0 ]]; then
     echo -e "  ${DIM}  none${RESET}"
+  elif have_gum && [[ "${COLUMNS:-100}" -ge 88 ]]; then
+    local entry sev pid name type label
+    {
+      for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
+        IFS='|' read -r sev pid name type <<<"$entry"
+        case "$sev" in
+          blocker) label="BLOCKS SLEEP" ;;
+          release) label="will release" ;;
+          system) label="system benign" ;;
+          display) label="display only" ;;
+          user) label="user active" ;;
+          *) label="info" ;;
+        esac
+        printf '%s,%s,%s,%s\n' "$label" "$pid" "$name" "$type"
+      done
+    } | ui_table "State,PID,Process,Assertion"
   else
     local entry sev pid name type
     for entry in "${PREFLIGHT_ASSERTIONS[@]}"; do
@@ -1279,23 +1496,19 @@ render_preflight() {
     done
   fi
 
-  echo ""
-  echo -e "  ${BOLD}Power state${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
-  echo -e "  ${DIM}Battery:        ${RESET}${PREFLIGHT_BATTERY_PCT} (${PREFLIGHT_BATTERY_SRC})"
-  echo -e "  ${DIM}Display sleep:  ${RESET}${PREFLIGHT_DISPLAYSLEEP_MIN:-?} min"
-  echo -e "  ${DIM}System sleep:   ${RESET}${PREFLIGHT_SLEEP_MIN:-?} min"
-  echo -e "  ${DIM}Hibernate mode: ${RESET}${PREFLIGHT_HIBERNATE_MODE:-?}"
+  ui_section "Power state"
+  ui_kv "Battery" "${PREFLIGHT_BATTERY_PCT} (${PREFLIGHT_BATTERY_SRC})"
+  ui_kv "Display sleep" "${PREFLIGHT_DISPLAYSLEEP_MIN:-?} min"
+  ui_kv "System sleep" "${PREFLIGHT_SLEEP_MIN:-?} min"
+  ui_kv "Hibernate mode" "${PREFLIGHT_HIBERNATE_MODE:-?}"
   local lid_display="unknown"
   case "$PREFLIGHT_LID" in
     Yes) lid_display="closed" ;;
     No) lid_display="open" ;;
   esac
-  echo -e "  ${DIM}Lid:            ${RESET}${lid_display}"
+  ui_kv "Lid" "$lid_display"
 
-  echo ""
-  echo -e "  ${BOLD}Active user sessions${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Active user sessions"
   if [[ -n "$PREFLIGHT_SESSIONS" ]]; then
     echo "$PREFLIGHT_SESSIONS" | while IFS= read -r line; do
       echo -e "  ${DIM}${line}${RESET}"
@@ -1304,41 +1517,30 @@ render_preflight() {
     echo -e "  ${DIM}  none${RESET}"
   fi
 
-  echo ""
-  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
-  echo -e "  ${BOLD}${MAGENTA}Verdict${RESET}"
-  echo -e "  ${DIM}═════════════════════════════════════════${RESET}"
-  echo ""
+  ui_section "Verdict"
   if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
-    echo -e "  ${YELLOW}⚠ Sleep-blocker scan unavailable.${RESET}"
-    echo -e "  ${DIM}pmset -g assertions failed or returned unexpected output —${RESET}"
-    echo -e "  ${DIM}cannot verify whether the Mac will actually sleep.${RESET}"
+    ui_panel warning "Sleep-blocker scan unavailable" \
+      "pmset -g assertions failed or returned unexpected output." \
+      "goodnight cannot verify whether the Mac will actually sleep."
   elif [[ ${#PREFLIGHT_BLOCKERS[@]} -eq 0 ]]; then
-    echo -e "  ${GREEN}✔ No active sleep blockers detected.${RESET}"
-    echo -e "  ${DIM}Releasing caffeinate will allow the Mac to sleep normally.${RESET}"
+    ui_panel success "No active sleep blockers detected" \
+      "Releasing caffeinate will allow the Mac to sleep normally."
     if [[ ${#PREFLIGHT_SYSTEM[@]} -gt 0 ]]; then
-      echo ""
-      echo -e "  ${DIM}Note: ${#PREFLIGHT_SYSTEM[@]} macOS system daemon assertion(s) detected —${RESET}"
-      echo -e "  ${DIM}these are released automatically by the OS at sleep time.${RESET}"
+      print_step "${#PREFLIGHT_SYSTEM[@]} macOS system daemon assertion(s) detected; the OS releases these at sleep time."
     fi
     if [[ ${#PREFLIGHT_DISPLAY_ONLY[@]} -gt 0 ]]; then
-      echo ""
-      echo -e "  ${DIM}Note: ${#PREFLIGHT_DISPLAY_ONLY[@]} display-only assertion(s) detected —${RESET}"
-      echo -e "  ${DIM}these keep the display awake but do not prevent system sleep.${RESET}"
+      print_step "${#PREFLIGHT_DISPLAY_ONLY[@]} display-only assertion(s) detected; these do not prevent system sleep."
     fi
   else
     local count=${#PREFLIGHT_BLOCKERS[@]}
-    echo -e "  ${RED}✖ ${count} active system-sleep blocker(s) besides caffeinate:${RESET}"
-    echo ""
+    ui_panel danger "${count} active system-sleep blocker(s)" \
+      "Releasing caffeinate alone will not be sufficient." \
+      "These processes must exit or release their assertions first."
     local entry pid name type
     for entry in "${PREFLIGHT_BLOCKERS[@]}"; do
       IFS='|' read -r pid name type <<<"$entry"
       echo -e "    • ${BOLD}${name}${RESET} (PID $pid) — ${RED}${type}${RESET}"
     done
-    echo ""
-    echo -e "  ${YELLOW}Releasing caffeinate alone will NOT be sufficient.${RESET}"
-    echo -e "  ${DIM}These processes must also exit (or release their assertions)${RESET}"
-    echo -e "  ${DIM}before the Mac can actually sleep.${RESET}"
   fi
   echo ""
 }
@@ -1511,11 +1713,10 @@ prompt_and_handle_blockers() {
     fi
   done
 
-  echo ""
-  echo -e "  ${BOLD}${YELLOW}Sleep blockers detected${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_panel warning "Sleep blockers detected" \
+    "Some running processes are currently preventing system sleep."
   if [[ ${#user_blockers[@]} -gt 0 ]]; then
-    echo -e "  ${BOLD}User apps${RESET} ${DIM}(can be terminated):${RESET}"
+    ui_section "User apps" "These can be terminated by goodnight."
     for entry in "${user_blockers[@]}"; do
       IFS='|' read -r pid name type <<<"$entry"
       echo -e "    ${RED}✖${RESET} ${BOLD}${name}${RESET} (PID $pid) — ${type}"
@@ -1523,7 +1724,7 @@ prompt_and_handle_blockers() {
     echo ""
   fi
   if [[ ${#system_blockers[@]} -gt 0 ]]; then
-    echo -e "  ${BOLD}System-managed${RESET} ${DIM}(cannot be killed — requires your action):${RESET}"
+    ui_section "System-managed" "These require your action; macOS will respawn them if killed."
     for entry in "${system_blockers[@]}"; do
       IFS='|' read -r pid name type <<<"$entry"
       echo -e "    ${YELLOW}⚠${RESET}  ${BOLD}${name}${RESET} (PID $pid) — ${type}"
@@ -2576,7 +2777,7 @@ if [[ "$SLEEP_NOW" == true ]]; then
   play_sound
   sleep "$DELAY_SECS"
   echo ""
-  echo -e "  ${BOLD}${GREEN}Good night 🌙${RESET}"
+  ui_panel success "Good night" "Requesting macOS sleep now."
   echo ""
   log_event "SLEEP_ATTEMPT (sleep-now)"
   if pmset sleepnow 2>/dev/null; then
@@ -2635,9 +2836,7 @@ if [[ "$SMART_WATCH" == true ]]; then
     INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
   fi
 
-  echo ""
-  echo -e "  ${BOLD}Smart watch${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Smart watch" "Watching Claude hook markers until all sessions are idle."
   print_step "Idle threshold: ${BOLD}${SMART_IDLE_SECONDS}s${RESET} (all Claude sessions must be idle this long)"
   print_step "Busy markers:   ${BOLD}$BUSY_DIR${RESET}"
   print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
@@ -2780,8 +2979,7 @@ if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
 
   TIMEOUT_SECS=$((TIMEOUT_HOURS * 3600))
 
-  echo -e "  ${BOLD}Starting watch${RESET}"
-  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  ui_section "Starting watch" "goodnight will wait quietly, then release caffeinate and sleep."
   print_step "Timeout:  ${BOLD}${TIMEOUT_HOURS}h${RESET}"
   print_step "Delay:    ${BOLD}${DELAY_SECS}s${RESET} before sleep"
   if [[ ${#INITIAL_CAFF_PIDS[@]} -gt 0 ]]; then
@@ -2953,7 +3151,7 @@ play_sound
 sleep "$DELAY_SECS"
 
 echo ""
-echo -e "  ${BOLD}${GREEN}Good night 🌙${RESET}"
+ui_panel success "Good night" "Requesting macOS sleep now."
 echo ""
 log_event "SLEEP_ATTEMPT"
 

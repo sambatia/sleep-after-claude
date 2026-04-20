@@ -1,0 +1,20 @@
+
+  sleep-after-claude
+  Sleep your Mac when Claude Code finishes.
+  ─────────────────────────────────────────
+
+  Pre-flight scan
+  Sleep readiness audit before goodnight releases caffeinate.
+  ─────────────────────────────────────────
+  Battery:         100% (AC Power)
+  System sleep:    1 min
+  State PID Process Assertion
+  will release        123                 caffeinate          PreventUserIdleSystemSleep
+  BLOCKS SLEEP        456                 zoom                PreventUserIdleSystemSleep
+
+  ╭─ No active sleep blockers detected ─────────────────────╮
+  │
+  │   Releasing caffeinate will allow the Mac to sleep normally.
+  │
+  ╰──────────────────────────────────────────────────────────╯
+
