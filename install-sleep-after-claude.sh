@@ -630,6 +630,14 @@ have_glow() {
   command -v glow >/dev/null 2>&1
 }
 
+ui_markdown() {
+  if have_glow; then
+    glow -
+  else
+    cat
+  fi
+}
+
 # Styled panel: gum-powered rounded box with colored border if gum is
 # available, otherwise the existing hand-drawn ╭─╮ card. Each argument
 # is one content line.
@@ -711,6 +719,10 @@ ui_panel() {
 # Usage: ui_confirm "Proceed anyway?"   (returns 0 on yes, 1 on no)
 ui_confirm() {
   local prompt="$1"
+  if [[ "$STDIN_IS_TTY" != true ]]; then
+    print_warn "Non-interactive confirmation unavailable — defaulting to no: $prompt"
+    return 1
+  fi
   if have_gum; then
     # --default=false means Enter selects No (safe default).
     gum confirm --default=false "$prompt"
@@ -781,6 +793,66 @@ ui_spin() {
   fi
   print_step "$title"
   "$@"
+}
+
+usage() {
+  ui_markdown <<'HELP'
+# sleep-after-claude
+
+Sleep your Mac when Claude Code finishes.
+
+## Usage
+
+```bash
+sleep-after-claude [options]
+```
+
+## Watch options
+
+| Flag | Description |
+|---|---|
+| `--pid, -p <pid>` | Watch a specific PID (default: auto-detect). |
+| `--timeout, -t <hrs>` | Force sleep after N hours, min 1 (default: 6). |
+| `--delay, -d <secs>` | Grace period before sleeping (default: 1). |
+| `--wait-for-start` | Poll until a Claude process appears. |
+
+## Mode options
+
+| Flag | Description |
+|---|---|
+| `--caffeinate-only` | Release caffeinate but don't sleep the Mac. |
+| `--dry-run` | Simulate: detect and wait, but don't sleep. |
+| `--list, -l` | Show detectable Claude processes and exit. |
+| `--preflight, -P` | Run pre-flight scan only, then exit. |
+| `--no-preflight` | Skip pre-flight scan entirely. |
+| `--force, -f` | Skip confirmation prompts. |
+| `--skip-update-check` | Don't check for a newer version on startup. |
+| `--check-update` | Force update check now, bypassing the 24h cache. |
+| `--no-auto-caffeinate` | Don't auto-start `caffeinate -dim` if missing. |
+| `--allow-battery` | Proceed even if the Mac is on battery (default: wait for AC). |
+| `--log-summary` | Render the session log as pretty markdown. |
+| `--sleep-now` | Skip the watch: preflight, handle blockers, sleep immediately. |
+| `--smart` | Sleep when all Claude sessions are idle (default when hooks are installed). |
+| `--watch-pid` | Legacy process-exit watch mode (default when hooks are not installed). |
+| `--install-hooks` | Install Claude Code hooks so `--smart` can detect idle sessions. |
+| `--uninstall-hooks` | Remove goodnight's Claude Code hooks. |
+
+## Output options
+
+| Flag | Description |
+|---|---|
+| `--brief, -b` | Show only the verdict in preflight output. |
+| `--json` | Emit preflight as JSON for automation. |
+| `--no-sound` | Skip the completion sound. |
+| `--notify, -n` | Send a macOS notification on completion. |
+| `--log` | Append completion events to the log file. |
+| `--log-file <path>` | Custom log file (implies `--log`). |
+| `--help, -h` | Show this help. |
+
+## Defaults
+
+Default log: `~/.local/state/sleep-after-claude.log`
+HELP
 }
 
 clear_line() {
@@ -2201,47 +2273,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help | -h)
-      echo ""
-      echo -e "  ${BOLD}sleep-after-claude${RESET} — sleep your Mac when Claude Code finishes"
-      echo ""
-      echo -e "  ${DIM}Usage:${RESET}"
-      echo -e "    sleep-after-claude [options]"
-      echo ""
-      echo -e "  ${DIM}Watch options:${RESET}"
-      echo -e "    --pid, -p <pid>       Watch a specific PID (default: auto-detect)"
-      echo -e "    --timeout, -t <hrs>   Force sleep after N hours, min 1 (default: 6)"
-      echo -e "    --delay, -d <secs>    Grace period before sleeping (default: 1)"
-      echo -e "    --wait-for-start      Poll until a Claude process appears"
-      echo ""
-      echo -e "  ${DIM}Mode options:${RESET}"
-      echo -e "    --caffeinate-only     Release caffeinate but don't sleep the Mac"
-      echo -e "    --dry-run             Simulate — detect and wait, but don't sleep"
-      echo -e "    --list, -l            Show detectable Claude processes and exit"
-      echo -e "    --preflight, -P       Run pre-flight scan only, then exit"
-      echo -e "    --no-preflight        Skip pre-flight scan entirely"
-      echo -e "    --force, -f           Skip confirmation prompts"
-      echo -e "    --skip-update-check   Don't check for a newer version on startup"
-      echo -e "    --check-update        Force update check now (bypass 24h cache)"
-      echo -e "    --no-auto-caffeinate  Don't auto-start caffeinate -dim if missing"
-      echo -e "    --allow-battery       Proceed even if the Mac is on battery (default: wait for AC)"
-      echo -e "    --log-summary         Render the session log as pretty markdown (needs ~/.local/state log)"
-      echo -e "    --sleep-now           Skip the watch — preflight + handle blockers + sleep immediately"
-      echo -e "    --smart               Sleep when all Claude sessions are idle (default when hooks are installed)"
-      echo -e "    --watch-pid           Legacy: watch kill -0 \$pid (default when hooks are not installed)"
-      echo -e "    --install-hooks       Install Claude Code hooks so --smart can detect idle sessions"
-      echo -e "    --uninstall-hooks     Remove goodnight's Claude Code hooks"
-      echo ""
-      echo -e "  ${DIM}Output options:${RESET}"
-      echo -e "    --brief, -b           Show only the verdict in preflight output"
-      echo -e "    --json                Emit preflight as JSON (for automation)"
-      echo -e "    --no-sound            Skip the completion sound"
-      echo -e "    --notify, -n          Send a macOS notification on completion"
-      echo -e "    --log                 Append completion events to the log file"
-      echo -e "    --log-file <path>     Custom log file (implies --log)"
-      echo -e "    --help, -h            Show this help"
-      echo ""
-      echo -e "  ${DIM}Default log:${RESET} ~/.local/state/sleep-after-claude.log"
-      echo ""
+      usage
       exit 0
       ;;
     *)
@@ -2464,11 +2496,7 @@ if [[ "$LOG_SUMMARY" == true ]]; then
       echo "| $pat | ${c:-0} |"
     done
   } | {
-    if have_glow; then
-      glow -
-    else
-      cat
-    fi
+    ui_markdown
   }
   exit 0
 fi
