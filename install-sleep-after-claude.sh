@@ -1742,11 +1742,31 @@ install_claude_hooks() {
 
   local prompt_cmd stop_cmd
   # These commands run inside Claude's hook subshell. Stdin is a JSON
-  # blob with .session_id. We $GN_BUSY_DIR via an env var written
-  # straight into the hook cmd (it's captured at install time — the
-  # absolute path is stable for the installing user).
-  prompt_cmd="mkdir -p \"$BUSY_DIR\" 2>/dev/null; sid=\$(jq -r .session_id 2>/dev/null); [ -n \"\$sid\" ] && touch \"$BUSY_DIR/\$sid\"; exit 0"
-  stop_cmd="sid=\$(jq -r .session_id 2>/dev/null); [ -n \"\$sid\" ] && rm -f \"$BUSY_DIR/\$sid\"; exit 0"
+  # blob with .session_id.
+  #
+  # F-03 fix: use the literal string $HOME in the hook command so it
+  # expands at HOOK RUNTIME, not at install time. This survives home-
+  # directory moves and differs-across-contexts (cron, launchd, etc.).
+  # The default busy dir is "${HOME}/.local/state/goodnight/busy" —
+  # rebuild the equivalent expression without freezing the absolute
+  # path. If the user set a non-default BUSY_DIR, we freeze that
+  # path (no way to round-trip an arbitrary override into a
+  # shell-evaluated string safely).
+  local busy_path_expr
+  if [[ "$BUSY_DIR" == "${HOME}/.local/state/goodnight/busy" ]]; then
+    busy_path_expr='"$HOME/.local/state/goodnight/busy"'
+  else
+    # Non-default path — freeze the absolute value but single-quote
+    # it so $ and other specials in the path are literal, not
+    # interpreted by Claude's hook shell (F-04 hardening).
+    local quoted_busy
+    # Escape any single quotes in the path so the shell single-quote
+    # stays balanced: a'b → 'a'\''b'
+    quoted_busy="${BUSY_DIR//\'/\'\\\'\'}"
+    busy_path_expr="'${quoted_busy}'"
+  fi
+  prompt_cmd="mkdir -p ${busy_path_expr} 2>/dev/null; sid=\$(jq -r .session_id 2>/dev/null); [ -n \"\$sid\" ] && touch ${busy_path_expr}/\"\$sid\"; exit 0"
+  stop_cmd="sid=\$(jq -r .session_id 2>/dev/null); [ -n \"\$sid\" ] && rm -f ${busy_path_expr}/\"\$sid\"; exit 0"
 
   # Back up existing file
   if [[ -f "$CLAUDE_SETTINGS_FILE" ]]; then

@@ -17,10 +17,20 @@ setup() {
   [ "$output" = "1" ]
   run jq '.hooks.Stop | length' "$CLAUDE_SETTINGS_FILE"
   [ "$output" = "1" ]
-  # Commands must reference the BUSY_DIR path
+  # Commands must reference the busy path via $HOME (F-03) so they
+  # survive home-directory moves, NOT the frozen absolute path.
   run jq -r '.hooks.Stop[0].hooks[0].command' "$CLAUDE_SETTINGS_FILE"
-  assert_contains "$output" "$BUSY_DIR"
+  assert_contains "$output" "\$HOME/.local/state/goodnight/busy"
+  assert_not_contains "$output" "$HOME/.local/state/goodnight/busy"
   assert_contains "$output" "session_id"
+}
+
+@test "hooks: F-03 — command contains \$HOME expression, not frozen path" {
+  bash "$REPO_ROOT/sleep-after-claude" --install-hooks >/dev/null
+  run jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$CLAUDE_SETTINGS_FILE"
+  assert_contains "$output" "\$HOME/.local/state/goodnight/busy"
+  # The frozen test-sandbox HOME path must NOT appear.
+  assert_not_contains "$output" "$HOME/.local/state"
 }
 
 @test "hooks: reinstall does not duplicate — arrays remain length 1" {
