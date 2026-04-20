@@ -375,7 +375,13 @@ hooks_already_installed() {
 
 echo ""
 say "Checking Claude Code hook setup..."
-if hooks_already_installed; then
+if [[ "${SAC_SKIP_HOOK_INSTALL:-}" == "1" ]]; then
+  # F-06: Explicit opt-out for users who don't want the installer
+  # touching ~/.claude/settings.json. Install still succeeds; they
+  # can always run `goodnight --install-hooks` later when ready.
+  warn "SAC_SKIP_HOOK_INSTALL=1 — skipping Claude Code hook install."
+  warn "Run ${C_CYAN}goodnight --install-hooks${C_RESET} to enable idle detection later."
+elif hooks_already_installed; then
   ok "Claude Code hooks already installed — idle detection ready."
 elif ! command -v jq >/dev/null 2>&1; then
   # Auto-install of jq in step 8a failed (offline, unsupported arch,
@@ -385,6 +391,12 @@ elif ! command -v jq >/dev/null 2>&1; then
   warn "  ${C_CYAN}goodnight --install-hooks${C_RESET}"
   warn "Until then goodnight runs in legacy ${C_BOLD}--watch-pid${C_RESET} mode."
 else
+  # F-06: About to modify ~/.claude/settings.json. Announce clearly
+  # before doing it. Users who don't want this can Ctrl+C now or
+  # re-run with SAC_SKIP_HOOK_INSTALL=1.
+  say "Installing Claude Code hooks into $CLAUDE_SETTINGS..."
+  say "(adds two ${C_BOLD}_managed_by: goodnight${C_RESET} entries; existing hooks preserved."
+  say " Skip with ${C_BOLD}SAC_SKIP_HOOK_INSTALL=1${C_RESET} and re-run; remove later with ${C_BOLD}goodnight --uninstall-hooks${C_RESET}.)"
   if "$TARGET" --install-hooks >/tmp/sac-hook-install.log 2>&1; then
     ok "Claude Code hooks installed — default mode is idle-detection."
     say "Restart any running Claude Code sessions so they pick up the new hooks."
@@ -446,6 +458,10 @@ __SCRIPT_START__
 # ─────────────────────────────────────────────────────────────
 
 set -uo pipefail
+
+# Capture original argv up-front so check_for_update can `exec` into
+# the freshly-installed binary preserving the user's invocation (F-05).
+SAC_ORIGINAL_ARGS=("$@")
 
 # ── macOS guard ───────────────────────────────────────────────
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -514,7 +530,8 @@ SKIP_PREFLIGHT=false
 FORCE=false
 BRIEF=false
 JSON_OUTPUT=false
-SKIP_UPDATE_CHECK=false
+SKIP_UPDATE_CHECK="${SAC_SKIP_UPDATE_CHECK:+true}"
+SKIP_UPDATE_CHECK="${SKIP_UPDATE_CHECK:-false}"
 NO_AUTO_CAFFEINATE=false
 ALLOW_BATTERY=false
 LOG_SUMMARY=false
@@ -1736,10 +1753,32 @@ check_for_update() {
   if ui_confirm "Update now?"; then
     echo ""
     print_step "Running installer..."
-    if curl -fsSL --max-time 30 "$UPDATE_INSTALLER_URL" | bash; then
+    # Run the installer with SAC_SKIP_HOOK_INSTALL=1 to avoid a
+    # double-install of hooks (user already has them if they got
+    # here via --smart default — the installer's hook step would
+    # be a no-op, but the announcement is unnecessary noise
+    # mid-session).
+    if SAC_SKIP_HOOK_INSTALL=1 curl -fsSL --max-time 30 "$UPDATE_INSTALLER_URL" | bash; then
       echo ""
-      print_ok "Update complete — continuing with the standard goodnight flow."
+      print_ok "Update complete — re-executing with the new version."
       echo ""
+      # F-05: exec into the freshly-installed script so the rest of
+      # this invocation runs the new code, not the stale in-memory
+      # copy. We re-invoke via the same path we were started from
+      # (usually ~/bin/sleep-after-claude) and preserve the original
+      # argv captured at script entry. Add SAC_SKIP_UPDATE_CHECK=1 in
+      # the child env so we don't re-prompt in the update-check we
+      # just completed. Use `exec` so the process replaces itself.
+      local self_path_for_exec
+      self_path_for_exec="${BASH_SOURCE[0]:-$0}"
+      if [[ -x "$self_path_for_exec" ]]; then
+        export SAC_SKIP_UPDATE_CHECK=1
+        exec "$self_path_for_exec" "${SAC_ORIGINAL_ARGS[@]}"
+      fi
+      # Fallthrough: exec should never return. If it does
+      # (unwritable path, script not on disk, etc.) warn and
+      # continue with the stale in-memory script.
+      print_warn "Could not re-exec after update — continuing with old version."
     else
       print_warn "Update failed. Continuing with the currently-installed version."
     fi
