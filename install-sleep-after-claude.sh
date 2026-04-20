@@ -226,6 +226,83 @@ else
   fi
 fi
 
+# ── 8a. Ensure runtime dependencies (jq) ──────────────────────────
+# Goodnight's default mode uses Claude Code hooks, and hook install /
+# detection requires `jq`. macOS doesn't ship with jq, so a clean
+# laptop would fall back to --watch-pid mode without it. To make the
+# install truly zero-touch, we auto-fetch a static jq binary from the
+# jqlang/jq GitHub releases and drop it in ~/bin (already on PATH
+# from step 8 above).
+#
+# Failure here is non-fatal: goodnight still works in --watch-pid
+# mode, and the user can install jq later. We just print a clear
+# message.
+ensure_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    ok "jq already installed: $(jq --version 2>/dev/null || echo '?')"
+    return 0
+  fi
+
+  local arch jq_url jq_tmp jq_dest jq_version
+  case "$(uname -m)" in
+    arm64) arch="arm64" ;;
+    x86_64) arch="amd64" ;;
+    *)
+      warn "Unknown CPU architecture '$(uname -m)' — cannot auto-install jq."
+      warn "Install manually: ${C_BOLD}brew install jq${C_RESET} — then re-run this installer."
+      return 1
+      ;;
+  esac
+
+  # Pinned to a known-good stable release. When bumping, verify the
+  # download works for both macos-arm64 and macos-amd64.
+  jq_version="1.8.1"
+  jq_url="https://github.com/jqlang/jq/releases/download/jq-${jq_version}/jq-macos-${arch}"
+  jq_dest="$HOME/bin/jq"
+  jq_tmp="$(mktemp -t goodnight-jq.XXXXXX)"
+
+  say "Downloading jq ${jq_version} for macOS (${arch})..."
+  if ! curl -fsSL --max-time 60 -o "$jq_tmp" "$jq_url" 2>/dev/null; then
+    warn "Could not download jq from GitHub (offline? firewall?)."
+    warn "Install later with: ${C_BOLD}brew install jq${C_RESET}"
+    warn "Goodnight will run in --watch-pid mode until then."
+    rm -f "$jq_tmp"
+    return 1
+  fi
+
+  # Basic sanity: should be a real binary (500KB–10MB) that runs.
+  local size
+  size="$(wc -c <"$jq_tmp" | tr -d ' ')"
+  if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size < 500000 || size > 10000000)); then
+    warn "Downloaded jq has implausible size (${size} bytes) — skipping."
+    rm -f "$jq_tmp"
+    return 1
+  fi
+
+  chmod +x "$jq_tmp"
+  # Strip the macOS quarantine attribute so gatekeeper doesn't flag
+  # this first-run-from-a-script binary.
+  xattr -d com.apple.quarantine "$jq_tmp" 2>/dev/null || true
+
+  if ! "$jq_tmp" --version >/dev/null 2>&1; then
+    warn "Downloaded jq binary didn't run (macOS gatekeeper? wrong arch?)."
+    warn "Install manually: ${C_BOLD}brew install jq${C_RESET}"
+    rm -f "$jq_tmp"
+    return 1
+  fi
+
+  mv "$jq_tmp" "$jq_dest"
+  # Ensure the newly-installed jq is on PATH for the rest of this
+  # installer run (future sessions pick it up via the rc file edit
+  # in step 8).
+  export PATH="$HOME/bin:$PATH"
+  ok "jq ${jq_version} installed at ~/bin/jq"
+}
+
+echo ""
+say "Ensuring runtime dependencies..."
+ensure_jq || true
+
 # ── 9. Verification ───────────────────────────────────────────────
 echo ""
 say "Running quick verification..."
@@ -258,13 +335,15 @@ say "Checking Claude Code hook setup..."
 if hooks_already_installed; then
   ok "Claude Code hooks already installed — idle detection ready."
 elif ! command -v jq >/dev/null 2>&1; then
-  warn "jq not found — Claude Code hook installation skipped."
-  warn "Install jq (${C_BOLD}brew install jq${C_RESET}) then run:"
+  # Auto-install of jq in step 8a failed (offline, unsupported arch,
+  # etc.). Record the skip reason — user can recover later.
+  warn "jq unavailable — Claude Code hook installation skipped."
+  warn "Once jq is installed (e.g. ${C_BOLD}brew install jq${C_RESET}), run:"
   warn "  ${C_CYAN}goodnight --install-hooks${C_RESET}"
-  warn "Without hooks, goodnight runs in legacy --watch-pid mode."
+  warn "Until then goodnight runs in legacy ${C_BOLD}--watch-pid${C_RESET} mode."
 else
   if "$TARGET" --install-hooks >/tmp/sac-hook-install.log 2>&1; then
-    ok "Claude Code hooks installed."
+    ok "Claude Code hooks installed — default mode is idle-detection."
     say "Restart any running Claude Code sessions so they pick up the new hooks."
   else
     warn "Could not auto-install Claude Code hooks. See /tmp/sac-hook-install.log"
