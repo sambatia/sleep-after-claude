@@ -369,6 +369,22 @@ if [[ -n "$RC" ]]; then
   echo ""
 fi
 
+# ── Drain the rest of the piped installer ────────────────────────
+# When invoked as `curl ... | bash`, curl streams the embedded
+# __SCRIPT_START__/__SCRIPT_END__ payload below this line. Without
+# draining, `exit 0` closes the pipe mid-write and curl fails with
+# "curl: (56) Failure writing output to destination". Cosmetically
+# ugly and confusing to users even when the install succeeded.
+#
+# Detection: `-p /dev/stdin` is true only when stdin is a FIFO
+# (i.e., piped input). Local runs (`bash install.sh` or
+# `bash < install.sh`) have stdin as a TTY or regular file → no
+# drain needed. This is the same idiom used by Homebrew's own
+# installer.
+if [[ -p /dev/stdin ]]; then
+  cat >/dev/null 2>&1 || true
+fi
+
 exit 0
 
 # ─── Embedded sleep-after-claude script follows ───────────────────
