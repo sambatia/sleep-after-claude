@@ -236,6 +236,42 @@ else
   exit 1
 fi
 
+# ── 9a. Claude Code hook setup ────────────────────────────────────
+# Default `goodnight` uses hook-based idle detection. Try to install
+# the hooks automatically so the user gets the expected behavior on
+# first run. Requires jq — if absent, emit a friendly note and skip
+# (the installed script still works in --watch-pid mode until the
+# user installs jq and runs `goodnight --install-hooks`).
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+hooks_already_installed() {
+  [[ -f "$CLAUDE_SETTINGS" ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
+      "$CLAUDE_SETTINGS" >/dev/null 2>&1
+  else
+    grep -q '"_managed_by"[[:space:]]*:[[:space:]]*"goodnight"' "$CLAUDE_SETTINGS" 2>/dev/null
+  fi
+}
+
+echo ""
+say "Checking Claude Code hook setup..."
+if hooks_already_installed; then
+  ok "Claude Code hooks already installed — idle detection ready."
+elif ! command -v jq >/dev/null 2>&1; then
+  warn "jq not found — Claude Code hook installation skipped."
+  warn "Install jq (${C_BOLD}brew install jq${C_RESET}) then run:"
+  warn "  ${C_CYAN}goodnight --install-hooks${C_RESET}"
+  warn "Without hooks, goodnight runs in legacy --watch-pid mode."
+else
+  if "$TARGET" --install-hooks >/tmp/sac-hook-install.log 2>&1; then
+    ok "Claude Code hooks installed."
+    say "Restart any running Claude Code sessions so they pick up the new hooks."
+  else
+    warn "Could not auto-install Claude Code hooks. See /tmp/sac-hook-install.log"
+    warn "You can install them manually later: ${C_CYAN}goodnight --install-hooks${C_RESET}"
+  fi
+fi
+
 # ── 10. Done ──────────────────────────────────────────────────────
 echo ""
 echo -e "  ${C_DIM}─────────────────────────────────────────${C_RESET}"
@@ -346,6 +382,7 @@ ALLOW_BATTERY=false
 LOG_SUMMARY=false
 SLEEP_NOW=false
 SMART_WATCH=false
+WATCH_PID_MODE=false
 INSTALL_HOOKS=false
 UNINSTALL_HOOKS=false
 CLAUDE_SETTINGS_FILE="${HOME}/.claude/settings.json"
@@ -1568,6 +1605,19 @@ check_for_update() {
   fi
 }
 
+# Return 0 if goodnight's hook entries are present in the Claude Code
+# settings file. Uses jq when available, falls back to a grep of the
+# "_managed_by:goodnight" tag.
+hooks_installed() {
+  [[ -f "$CLAUDE_SETTINGS_FILE" ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
+      "$CLAUDE_SETTINGS_FILE" >/dev/null 2>&1
+  else
+    grep -q '"_managed_by"[[:space:]]*:[[:space:]]*"goodnight"' "$CLAUDE_SETTINGS_FILE" 2>/dev/null
+  fi
+}
+
 # ── Claude Code hook integration ──────────────────────────────
 # These functions manage two hooks in ~/.claude/settings.json:
 #   - UserPromptSubmit: touch $BUSY_DIR/<session_id> when user sends
@@ -1839,8 +1889,18 @@ while [[ $# -gt 0 ]]; do
     --smart)
       # Hook-based idle detection: sleep when all Claude sessions have
       # fired their Stop hook (i.e., none are processing a message).
-      # Requires --install-hooks to have been run once.
+      # Requires --install-hooks to have been run once. This is the
+      # default when hooks are installed — the flag is still accepted
+      # for explicit invocation and scripts.
       SMART_WATCH=true
+      shift
+      ;;
+    --watch-pid)
+      # Legacy process-exit watching: watches kill -0 $pid and sleeps
+      # when the claude process dies. Pre-hooks behavior. Use when you
+      # actually want to run Claude non-interactively and wait for the
+      # process to exit.
+      WATCH_PID_MODE=true
       shift
       ;;
     --install-hooks)
@@ -1877,7 +1937,8 @@ while [[ $# -gt 0 ]]; do
       echo -e "    --allow-battery       Proceed even if the Mac is on battery (default: wait for AC)"
       echo -e "    --log-summary         Render the session log as pretty markdown (needs ~/.local/state log)"
       echo -e "    --sleep-now           Skip the watch — preflight + handle blockers + sleep immediately"
-      echo -e "    --smart               Sleep when all Claude sessions are idle (needs --install-hooks first)"
+      echo -e "    --smart               Sleep when all Claude sessions are idle (default when hooks are installed)"
+      echo -e "    --watch-pid           Legacy: watch kill -0 \$pid (default when hooks are not installed)"
       echo -e "    --install-hooks       Install Claude Code hooks so --smart can detect idle sessions"
       echo -e "    --uninstall-hooks     Remove goodnight's Claude Code hooks"
       echo ""
@@ -1900,6 +1961,27 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── Default mode selection ────────────────────────────────────
+# If the user passed no explicit watch mode, pick one based on whether
+# Claude Code hooks are installed:
+#   - hooks installed → --smart (hook-based idle detection)
+#   - hooks absent    → --watch-pid (legacy process-exit watching)
+#                       with a one-line note pointing at --install-hooks
+#
+# --install-hooks / --uninstall-hooks / --preflight / --list /
+# --log-summary / --sleep-now bypass this (they set their own paths
+# and don't use either watch mode).
+if [[ "$SMART_WATCH" != true && "$WATCH_PID_MODE" != true &&
+  "$SLEEP_NOW" != true && "$PREFLIGHT_ONLY" != true &&
+  "$LIST_MODE" != true && "$LOG_SUMMARY" != true &&
+  "$INSTALL_HOOKS" != true && "$UNINSTALL_HOOKS" != true ]]; then
+  if hooks_installed; then
+    SMART_WATCH=true
+  else
+    WATCH_PID_MODE=true
+  fi
+fi
 
 # ── Open persistent FIFO FD for fork-free micro_sleep ─────────
 if [[ "$USE_BUILTIN_SLEEP" == true ]]; then
@@ -2139,10 +2221,13 @@ fi
 # no process-exit waiting — sleep happens as soon as all sessions
 # have fired their Stop hook.
 if [[ "$SMART_WATCH" == true ]]; then
-  if [[ ! -d "$BUSY_DIR" ]] && [[ ! -f "$CLAUDE_SETTINGS_FILE" ]]; then
-    print_error "Hooks don't appear to be installed. Run: ${BOLD}goodnight --install-hooks${RESET}"
+  if ! hooks_installed; then
+    print_error "Claude Code hooks aren't installed — --smart mode can't detect idle sessions."
+    print_step "Install them once with: ${BOLD}goodnight --install-hooks${RESET}"
+    print_step "Or fall back to process-watch mode with: ${BOLD}goodnight --watch-pid${RESET}"
     exit 1
   fi
+  mkdir -p "$BUSY_DIR" 2>/dev/null || true
   # Run preflight + blocker handling first (same as default flow).
   if [[ "$SKIP_PREFLIGHT" == false ]]; then
     preflight_scan
@@ -2321,10 +2406,10 @@ fi
 [[ "$LOG_ENABLED" == true ]] && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
 [[ "$USE_SPINNER" == false ]] && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
 print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
-if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
-  echo -e "  ${DIM}Tip: an idle Claude REPL won't exit on its own. If you want${RESET}"
-  echo -e "  ${DIM}Claude-Code-hook-aware idle detection, run ${BOLD}goodnight --install-hooks${RESET}${DIM}"
-  echo -e "  ${DIM}once then use ${BOLD}goodnight --smart${RESET}${DIM}. Or ${BOLD}goodnight --sleep-now${RESET}${DIM} to sleep right now.${RESET}"
+if [[ "${SMART_WATCH_DONE:-false}" != true ]] && ! hooks_installed; then
+  echo -e "  ${DIM}Tip: Claude Code hooks aren't installed — this watch waits for the${RESET}"
+  echo -e "  ${DIM}process to exit, which an interactive Claude REPL won't do. Run${RESET}"
+  echo -e "  ${DIM}${BOLD}goodnight --install-hooks${RESET}${DIM} once to enable idle-aware detection.${RESET}"
 fi
 echo ""
 
