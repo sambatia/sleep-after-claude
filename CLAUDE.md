@@ -1,8 +1,15 @@
 # CLAUDE.md
 
-<!-- Last updated: 2026-04-20 | Audit cycle: 2026-04-20 (follow-on cycle — smart-mode / self-update / hooks) -->
+<!-- Last updated: 2026-04-20 | Audit cycle: 2026-04-20 (docs/comment sync after PR #5) -->
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Knowledge authority
+
+- `README.md` is the public user/contributor source of truth: install path, CLI behavior, flags, test commands, release workflow, and troubleshooting.
+- `CLAUDE.md` is the maintainer/agent source of truth: architecture, invariants, conventions, audit history, known risks, and implementation navigation.
+- `CONTRIBUTING.md`, `SECURITY.md`, and `PUBLIC_RELEASE_CHECKLIST.md` are domain-specific satellites. Keep them consistent with `README.md` and reference `CLAUDE.md` for implementation details instead of duplicating architecture.
+- `.github/workflows/ci.yml` and `.pre-commit-config.yaml` define the enforced verification pipeline. If docs and these files disagree about checks, update the docs to match the configs.
 
 ## Repository layout
 
@@ -95,11 +102,12 @@ Regression tests: `tests/hooks.bats`, `tests/hook-command-runtime.bats` (F-03 ru
 
 ## Smart-watch semantics
 
-`smart_watch_loop` fires sleep only when **all three** conditions hold:
+`smart_watch_loop` fires sleep only when the enforced hook-state conditions hold:
 
 1. **Proof-of-life** — at least one busy marker has been observed since watch start OR one already exists at entry (F-01 cold-start guard — prevents premature-sleep when hooks aren't loaded in the running session yet).
 2. **Continuous idle** — busy count has been 0 for `SMART_IDLE_SECONDS` uninterrupted.
-3. ~~Live-process absence~~ — documented as belt-and-suspenders in the function header but not currently enforced in the loop body; `--smart` relies on hook-based signals only. If the user's Claude session pre-dates hook install (hooks not yet loaded), the loop warns via the spinner text ("Waiting for a Claude prompt…") and stays in cold mode indefinitely.
+
+`--smart` relies on hook-based signals only; it does not enforce a separate live-process absence guard. If the user's Claude session pre-dates hook install (hooks not yet loaded), the loop warns via the spinner text ("Waiting for a Claude prompt…") and stays in cold mode indefinitely.
 
 Default-mode selection (lines ~1762–1781): if the user passes no explicit watch flag, `goodnight` picks `--smart` when `hooks_installed` returns true, otherwise `--watch-pid`. Early-exit modes (`--install-hooks`, `--uninstall-hooks`, `--preflight`, `--list`, `--log-summary`, `--sleep-now`) bypass the selection entirely.
 
@@ -184,7 +192,7 @@ Linear top-to-bottom flow with labeled section banners (`# ── Section ──
 1. **macOS guard + TTY/Bash-version detection** — sets `USE_BUILTIN_SLEEP` (Bash ≥ 4 FIFO trick to avoid forking `sleep`), color toggles, and TTY flags that downstream output branches on. Captures `SAC_ORIGINAL_ARGS` up-front for the self-update re-exec path (F-05).
 2. **Colours + config defaults** — flag-state booleans, paths, TTL values.
 3. **Helpers** — `print_*` helpers, `elapsed_label`, `play_sound`, `as_escape` / `json_escape`, `notify_macos`, `log_event` (warn-once on write failure), `micro_sleep` (FIFO builtin fast-path).
-4. **gum / glow integration** — optional polish layer. `have_gum` / `have_glow` detection gates TUI rendering (panels, confirms, menus, spinners). Over SSH: gum defaults off because mobile SSH clients (Termius/Blink) mishandle `/dev/tty` and arrow keys. `SAC_NO_GUM=1` forces fallback; `SAC_FORCE_GUM=1` re-enables over SSH; `SAC_NO_GLOW=1` disables markdown rendering.
+4. **gum / glow integration** — optional polish layer. `have_gum` / `have_glow` detection gates TUI rendering (panels, confirms, menus, spinners, markdown help/log summary rendering). Over SSH: gum defaults off because mobile SSH clients (Termius/Blink) mishandle `/dev/tty` and arrow keys. `SAC_NO_GUM=1` forces fallback; `SAC_FORCE_GUM=1` re-enables over SSH; `SAC_NO_GLOW=1` disables markdown rendering. Confirmation prompts fail closed when stdin is not a TTY.
 5. **Claude process detection** (`find_claude_processes`) — two-tier: a "tight" pass using `pgrep -x claude` / `pgrep -f claude-code`, falling back to a broad `pgrep -fi claude` filtered by `EXCLUDE_PATTERN` to weed out Electron apps (Claude.app, Cursor, Windsurf, chrome-native-host, `anthropic-tools`, etc.). When adding a new false-positive, update `EXCLUDE_PATTERN`.
 6. **Pre-flight scan** (`scan_assertions`, `preflight_scan`, `render_preflight*`) — inventories caffeinate processes, `pmset -g assertions`, clamshell/lid state, battery, user sessions, then emits a verdict. Gated by `--no-preflight`, restricted by `--brief`, machine-readable via `--json`. See "Preflight fail-closed contract" above.
 7. **Blocker classification** (`classify_blocker`, `prompt_and_handle_blockers`, `print_post_watch_blockers`) — groups assertions into severity buckets and drives the interactive terminate/skip/abort menu when blockers are present.
@@ -213,10 +221,15 @@ When modifying behavior, identify which section owns the concern; most flags tou
 - Bash, `set -uo pipefail` (intentionally no `-e` — the script relies on non-zero exits from `pgrep` being non-fatal).
 - All user-facing output goes through `print_header` / `print_step` / `print_ok` / `print_warn` / `print_error` / `print_done`. Don't emit raw `echo` for status lines — these helpers handle TTY/non-TTY color stripping.
 - Styled UI (confirms, menus, panels, spinners) goes through `ui_confirm` / `ui_choose` / `ui_panel` / `ui_spin` so gum / hand-drawn fallback selection happens in one place.
+- Markdown help and log-summary output goes through `ui_markdown` so `glow` remains optional and non-TTY output stays plain.
 - Integer validation uses `is_integer` / `is_positive_integer`; reuse rather than inlining regex.
 - `printf` format strings used with dynamic data must be **static** (every dynamic value passes through `%s`) — stray `%` in battery percents, cmd names, etc. would otherwise corrupt the format. Search "Static format" in the source for the safety pattern.
 - `--json` output is consumed by automation; any new preflight field must be added to the JSON emitter **and** the human-readable renderer **and** the JSON-shape assertions in `tests/preflight-fail-closed.bats`.
 - `log_event` writes to `$LOG_FILE` only when `--log` is set. It warns to stderr **once per session** on first write failure (brace-grouped `{ echo ...; } 2>/dev/null` so bash's own redirection error is also suppressed). Subsequent failures stay silent to avoid spamming the watch loop. Event names are stable — `--log-summary` groups on them.
+
+### Commenting standard
+
+This is a Bash project, so production comments use `#` comments rather than JSDoc/TSDoc. Keep comments close to the function or control-flow block they explain. File headers should state the script's responsibility and consumers. Function comments should document contracts, failure behavior, side effects, and non-obvious safety constraints; do not add comments that merely restate a function name or a simple assignment. If `sleep-after-claude` comments change, mirror the same comment-only update into the embedded payload in `install-sleep-after-claude.sh` and run `bash scripts/check-parity.sh`.
 
 ### Formatting / linting
 
@@ -244,24 +257,20 @@ For editor experience, `bash-language-server` gives real-time shellcheck diagnos
 
 ## Audit cycle history
 
-### 2026-04-20 (follow-on cycle)
+### 2026-04-20 (PR #4 / PR #5 safety follow-up)
 
-Second audit → remediation → test expansion → docs sync cycle, scoped to the features added between 2026-04-19 and 2026-04-20 (`--smart` mode, `--sleep-now`, self-update, hook integration, jq auto-install, power gate, `gum`/`glow` polish).
+Latest audit → remediation → test expansion cycle on `main`, focused on smart-mode correctness, hook failure safety, dry-run side effects, and terminal UI behavior.
 
-- **Remediation (12 findings across 6 commits):**
-  - **F-01** (`8b9ed7a`) — `smart_watch_loop` cold-start: require proof-of-life (busy marker) before arming the idle countdown.
-  - **F-02** (`ad64164`) — SHA-256 verification for auto-downloaded `jq` binary; per-arch expected hashes, override via `SAC_JQ_SHA256`.
-  - **F-03** (`79d8e4f`) — lazy-expand `$HOME` in Claude hook commands so they survive home-dir moves and differ-context invocations.
-  - **F-04** (`79d8e4f`) — harden path quoting in hook commands against `$` / whitespace / metachars in custom `BUSY_DIR` values.
-  - **F-05** (`6e9871f`) — self-update re-exec: `exec` into the freshly-installed script preserving `SAC_ORIGINAL_ARGS`; set `SAC_SKIP_UPDATE_CHECK=1` in child env.
-  - **F-06** (`6e9871f`) — hook-install opt-out (`SAC_SKIP_HOOK_INSTALL=1`); explicit announcement before touching `~/.claude/settings.json`.
-  - **F-07** (`b63e632`) — mutual-exclusion lock (`~/.local/state/goodnight/lock` via atomic `mkdir`) to prevent concurrent watches racing on caffeinate + pmset.
-  - **F-08** (`8b9ed7a`) — stale-marker reaper threshold loosened to 24h so long-running Claude tasks aren't reaped mid-work; override via `SAC_STALE_MARKER_MINUTES`.
-  - **F-09** (`ad64164`) — probe common `jq` paths (`~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`) before reaching for the network.
-  - **F-11** (`b3b8981`) — bound installer stdin drain with `gtimeout` / `timeout` / background-watchdog fallback.
-  - **F-12** (`b3b8981`) — removed double-cleanup: `on_interrupt` no longer calls `cleanup_fd_and_tmp` directly; EXIT trap owns cleanup.
-- **Test expansion (`df6138d` + the fix commits):** runtime tests added for F-01, F-02, F-03, F-04, F-07 plus unit/semantic coverage across all remediated areas. Totals are retrievable via `bats tests/ --count`.
-- **Docs (this commit):** CLAUDE.md + README.md rewritten to reflect the post-remediation state, including new subsystems (hooks, self-update, power gate, concurrent lock) and the updated architecture section.
+- **Escalated / not fixed in code:** latest-cycle **F-01** remains a supply-chain trust decision for piped installs. The installer supports size checks, marker checks, and optional `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256`; without a user-supplied SHA pin, default `curl | bash` still trusts the HTTPS raw GitHub response.
+- **Remediation (merged to `main` as PR #4, squash commit `f5785c6`):**
+  - **F-02** — smart-mode idle completion now falls through cleanly to the release-caffeinate + sleep path instead of being revalidated as a PID watch.
+  - **F-03** — hook install fails closed on invalid `~/.claude/settings.json` and preserves the existing file.
+  - **F-04** — hook uninstall fails closed on invalid settings JSON, and hook readiness checks require `jq` rather than marker text alone.
+  - **F-05** — dry-run mode no longer auto-starts/releases `caffeinate` or calls `pmset sleepnow`, including `--sleep-now --dry-run`.
+  - **F-07** — watch locking and smart-mode flow prevent concurrent runs from racing on shared sleep side effects.
+- **Tests:** regression coverage was added or expanded in `tests/smart-watch-runtime.bats`, `tests/hooks.bats`, `tests/default-mode.bats`, and `tests/auto-caffeinate.bats`. Totals are retrievable via `bats tests/ --count`.
+- **Terminal UI polish (merged to `main` as PR #5, squash commit `386c5a8`):** help and log-summary rendering go through optional `glow`; confirmations fail closed when non-interactive; terminal UI behavior is covered by `tests/terminal-ui.bats`.
+- **Docs:** CLAUDE.md + README.md reflect the post-remediation state, including hooks, self-update, power gate, concurrent lock, terminal UI fallbacks, and the current GitHub Actions pipeline.
 
 ### 2026-04-19 (initial audit)
 

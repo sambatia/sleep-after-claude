@@ -478,10 +478,11 @@ __SCRIPT_START__
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
 #  sleep-after-claude
-#  Watches a Claude Code process and sleeps the Mac when done.
+#  Watches Claude Code work and sleeps the Mac when it is done.
 #
-#  Includes a pre-flight scan of sleep-preventing processes and
-#  power assertions so you know whether sleep will actually happen.
+#  Supports hook-based smart idle detection, PID-exit watching,
+#  pre-flight sleep-blocker scans, optional terminal UI polish, and
+#  an auditable sleep attempt path.
 #
 #  Usage: sleep-after-claude [options]
 # ─────────────────────────────────────────────────────────────
@@ -630,6 +631,8 @@ have_glow() {
   command -v glow >/dev/null 2>&1
 }
 
+# Render markdown to the terminal when glow is available; otherwise
+# pass the plain markdown through unchanged for scripts and CI logs.
 ui_markdown() {
   if have_glow; then
     glow -
@@ -795,6 +798,8 @@ ui_spin() {
   "$@"
 }
 
+# Render the public CLI help from one markdown block so the styled and
+# plain fallbacks stay byte-for-byte consistent.
 usage() {
   ui_markdown <<'HELP'
 # sleep-after-claude
@@ -2027,9 +2032,9 @@ uninstall_claude_hooks() {
   print_ok "Removed goodnight hooks from ${BOLD}$CLAUDE_SETTINGS_FILE${RESET}"
 }
 
-# Count Claude sessions currently marked busy. Stale markers (file
-# mtime older than 2h) are treated as dead and deleted. Returns the
-# count on stdout.
+# Count Claude sessions currently marked busy. Stale markers older
+# than SMART_STALE_MARKER_MINS are treated as dead and deleted.
+# Returns the count on stdout.
 count_busy_sessions() {
   [[ -d "$BUSY_DIR" ]] || {
     echo 0
@@ -2048,19 +2053,17 @@ count_busy_sessions() {
 }
 
 # Smart-watch loop. Polls the busy directory every 2 seconds. Sleep
-# fires only when ALL of:
+# fires only when BOTH enforced hook-state conditions hold:
 #   (a) at least one busy marker has been observed since watch start
 #       (prevents premature-sleep on cold start — F-01), AND
 #   (b) the busy directory has been empty continuously for
-#       SMART_IDLE_SECONDS, AND
-#   (c) no live Claude process is present (belt-and-suspenders guard
-#       against forgotten Claude sessions that never fired a hook
-#       — e.g., hooks not loaded because the session pre-dates
-#       --install-hooks).
+#       SMART_IDLE_SECONDS.
 #
 # If no busy marker ever appears but there IS a live Claude process,
 # the loop stays in "cold" state and warns the user via the spinner
-# text that hooks may not be loaded in the running session.
+# text that hooks may not be loaded in the running session. There is
+# no separate live-process absence guard in smart mode; hooks are the
+# contract for idle detection.
 smart_watch_loop() {
   local idle_start=0 now busy seen_busy=false
   local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")

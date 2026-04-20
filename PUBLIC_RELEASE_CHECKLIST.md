@@ -94,7 +94,7 @@ Create one ruleset targeting `main` with:
 
 ## 3. Should be reviewed by a human before / shortly after publishing
 
-- [ ] **README license claim.** `README.md` Section 18 currently says *"No license file is currently present… 'All rights reserved' by default."* After this cycle, a `LICENSE` file does exist (MIT). The legal LICENSE file supersedes the README note, but the README wording is now stale. Updating README is explicitly out of scope for this hardening pass per the task brief; recommend a one-line fix in a follow-up commit. *(Suggested replacement: "This project is released under the MIT License — see `LICENSE` for the full text.")*
+- [ ] **README license claim.** `README.md` now points at the MIT `LICENSE` file and the license badge reflects MIT. Before publishing, confirm that MIT is still the intended license.
 - [ ] **Confirm the author name and year** in `LICENSE` (currently: *Sameh Abdalla, 2026*). Change if this should be attributed differently (e.g., a future company/organization).
 - [ ] **Confirm the `sambatia` GitHub username / org** in raw URLs across `sleep-after-claude` and `install-sleep-after-claude.sh`. If the repo ever moves under a different org, the installer and self-update URL defaults must be updated (users can always override via `SLEEP_AFTER_CLAUDE_INSTALLER_URL` / `SLEEP_AFTER_CLAUDE_UPDATE_URL`, but the defaults should be correct).
 - [ ] **Consider tagging a first release.** Once `main` is clean and CI is green, cut `v0.1.0`. Recommended: attach the SHA-256 of `install-sleep-after-claude.sh` at that tag to the release notes so security-conscious users can pin via `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256` against a known-good published value.
