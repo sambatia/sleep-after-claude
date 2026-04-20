@@ -77,7 +77,7 @@ jobs:
         # `jq` + homebrew's bash 5.x are required for several tests that
         # source functions via process substitution and use jq in
         # assertions. The stock /usr/bin/bash 3.2 + no-jq macos-latest
-        # runner fails 7/118 without these.
+        # runner has historically failed without these dependencies.
         run: |
           brew update >/dev/null
           brew install bats-core jq bash

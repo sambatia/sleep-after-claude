@@ -5,7 +5,7 @@
 ![macOS](https://img.shields.io/badge/platform-macOS-silver)
 ![Shell](https://img.shields.io/badge/made%20with-Bash-1f425f.svg)
 ![Tests](https://img.shields.io/badge/tests-bats--core-brightgreen)
-![License](https://img.shields.io/badge/license-Unlicensed-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Last commit](https://img.shields.io/github/last-commit/sambatia/sleep-after-claude)
 ![Open issues](https://img.shields.io/github/issues/sambatia/sleep-after-claude)
 
@@ -70,7 +70,7 @@ AI coding assistants like **Claude Code** are becoming the workhorse of serious 
 | 🛠️ **Zero config, one-liner install** | Non-technical users, ops teams, first-timers | Copy one `curl` command → working tool in ~5 seconds |
 | 📋 **Full audit log of what happened** | Debuggers, paranoid users, ops teams | Every event (started watching, Claude finished, sleep attempted) written to a log file you can read the next morning |
 | 🔍 **Machine-readable JSON output** | Automation, CI, power users | Feed the preflight verdict into scripts, dashboards, or other tools |
-| 🔒 **Security-hardened installer** | Anyone pasting `curl | bash` into their shell | Size checks, marker checks, optional SHA-256 pinning — the install can't silently ship the wrong binary |
+| 🔒 **Security-hardened installer** | Anyone pasting `curl | bash` into their shell | Size checks, marker checks, and optional SHA-256 pinning; users who need stronger provenance can pin both URL and hash |
 
 ---
 
@@ -205,37 +205,47 @@ flowchart TB
   INST -->|writes| SAC
 ```
 
-Everything happens locally on your Mac. Nothing phones home. No network traffic after install. The only external dependency is macOS itself — specifically the `pmset`, `pgrep`, `ps`, `caffeinate`, and `osascript` binaries that Apple ships with every machine.
+Everything important happens locally on your Mac. goodnight has no telemetry, analytics, or server-side component. Network access is limited to installation, optional one-time `jq` download, and the once-per-24h self-update check unless you disable it with `--skip-update-check` / `SAC_SKIP_UPDATE_CHECK=1`.
 
 ---
 
-## 📸 Section 9: Screenshots & Visual Tour
+## 📸 Section 9: Terminal Tour
 
-> **Note:** goodnight is a command-line tool. The "screenshots" below show terminal output rather than graphical UI. If you'd like real images, they can be added under a `screenshots/` folder — placeholders are noted.
+> **Note:** goodnight is a command-line tool. The current repository does not track static screenshot images; the commands below are the source of truth for the live terminal UI.
 
 ### 🖼️ The preflight audit
 
-![Preflight audit output](screenshots/preflight.png)
+Run:
 
-This is what you see when you run `goodnight --preflight`. It shows the target Claude process, which system daemons are holding sleep assertions (most are benign), and a final verdict at the bottom. If you see a green checkmark next to "No active sleep blockers detected", you can safely walk away.
+```bash
+goodnight --preflight
+```
 
-### 🖼️ The watch loop (waiting for Claude)
+The preflight view shows the target Claude process, any detected sleep assertions, power state, active user sessions, and a final verdict. If the scan fails, the verdict is "sleep-blocker scan unavailable" rather than a false "clear".
 
-![Watch loop spinner](screenshots/watching.png)
+### 🖼️ The watch loop
 
-After the preflight clears, you'll see a spinner with an elapsed-time counter. This updates 10 times per second and uses essentially zero CPU (thanks to a FIFO-based sleep trick). You can just close the laptop — the spinner keeps running in the background.
+Run:
 
-### 🖼️ The moment Claude finishes
+```bash
+goodnight
+```
 
-![Completion output](screenshots/finished.png)
+After the preflight gate clears, goodnight either watches Claude Code hook busy markers (`--smart`) or a concrete Claude PID (`--watch-pid`). Interactive terminals show a spinner; non-interactive output degrades to periodic plain status lines.
 
-As soon as Claude exits, you see a green checkmark with the total elapsed time. Any remaining `caffeinate` processes are released, and the Mac begins its sleep countdown (default 1 second). A completion sound plays if `--no-sound` isn't set.
+### 🖼️ The completion path
 
-### 🖼️ The JSON preflight (for power users)
+When the watched work finishes, goodnight releases the captured `caffeinate` processes, respects `--dry-run` / `--caffeinate-only`, waits the configured `--delay`, and calls `pmset sleepnow` with an AppleScript sleep fallback.
 
-![JSON preflight output](screenshots/json.png)
+### 🖼️ The JSON preflight
 
-Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_sleep`, `blockers[]`, and `power.*` fields are stable and meant for scripts — you can feed this directly into other automation.
+Run:
+
+```bash
+goodnight --json --preflight
+```
+
+Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_sleep`, `blockers[]`, and `power.*` fields are stable and meant for scripts — consumers must treat `can_sleep: null` as "unknown", not "safe".
 
 ---
 
@@ -312,16 +322,16 @@ Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_
 
 #### 🧪 Quality
 
-- [x] **Full bats regression test suite** — one file per risk area, covering every finding from both audit cycles. Live count via `bats tests/ --count`.
+- [x] **Full bats regression test suite** — one file per risk area, covering every remediated finding from the audit cycles. Live count via `bats tests/ --count`.
 - [x] **Parity guard** — script that enforces the installer and standalone script match byte-for-byte.
 - [x] **Pre-commit framework integration** — `.pre-commit-config.yaml` runs parity + shellcheck + shfmt + hygiene on every commit.
+- [x] **GitHub Actions CI** — macOS runner enforces syntax, shellcheck, shfmt, parity, and bats on PRs and pushes to `main`.
 
 #### 🗺️ Planned
 
 - [ ] **Uninstall command** — one-shot removal of the binary, alias, and logs.
 - [ ] **Sub-hour timeout units** — accept `--timeout 30m` instead of hours-only.
 - [ ] **Caffeinate ownership check** — only kill `caffeinate` processes parented by Claude Code.
-- [ ] **GitHub Actions CI** — run the bats suite on a macOS runner at PR time.
 - [ ] **Immutable pinned release URL** — tagged GitHub Releases with baked-in SHA-256.
 
 ---
@@ -337,7 +347,7 @@ You need **macOS** — any modern version works (tested on macOS 26.x / Darwin 2
 | macOS | Any recent version | `sw_vers -productVersion` | Any Mac |
 | Bash or zsh | Any shipped version | `bash --version` | Pre-installed on macOS |
 | `curl` | Any | `curl --version` | Pre-installed on macOS |
-| Claude Code | Optional, but the whole point | `claude --version` | [claude.com/code](https://claude.com/code) |
+| Claude Code | Optional, but the whole point | `claude --version` | [claude.com/product/claude-code](https://claude.com/product/claude-code) |
 
 You do **not** need Node, Python, Homebrew, or anything else.
 
@@ -378,7 +388,7 @@ goodnight needs zero configuration for normal use. These are optional knobs:
 
 | Variable | Required? | Description | Example Value |
 |---|---|---|---|
-| `SLEEP_AFTER_CLAUDE_INSTALLER_URL` | No | Override the installer source URL (useful for pinning to a commit SHA) | `https://raw.githubusercontent.com/sambatia/sleep-after-claude/abc123.../install-sleep-after-claude.sh` |
+| `SLEEP_AFTER_CLAUDE_INSTALLER_URL` | No | Override the installer source URL (useful for pinning to a commit SHA) | `https://raw.githubusercontent.com/sambatia/sleep-after-claude/<commit-sha>/install-sleep-after-claude.sh` |
 | `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256` | No | Require the downloaded installer to match a specific SHA-256 | `a41a6cfe20b6d4929cff4a5db00ad0c6...` |
 | `SLEEP_AFTER_CLAUDE_UPDATE_URL` | No | Override the self-update source URL (same format as installer URL) | main-branch raw URL |
 | `SAC_JQ_SHA256` | No | Override the expected SHA-256 for the auto-installed `jq` binary (for legitimate jq re-releases) | 64-hex hash |
@@ -702,7 +712,7 @@ A line starting with `ok` passed; `not ok` failed (with an error trace). The num
 | Environment | Notes |
 |---|---|
 | **Local dev** | Run against your own Mac. Use `HOME=/tmp/sandbox` to test installer behavior in isolation. |
-| **CI** | Bats tests currently require manual invocation. A macOS GitHub Actions runner is planned (see Roadmap). |
+| **CI** | GitHub Actions runs syntax, shellcheck, shfmt, parity, and bats on macOS for PRs and pushes to `main`. |
 | **Production (end-user Macs)** | Users get the tool via `curl | bash`. The GitHub raw URL is the production "server". |
 
 ---
@@ -744,7 +754,7 @@ A line starting with `ok` passed; `not ok` failed (with an error trace). The num
 
 ### Phase 4 — Release hygiene & reach (Current focus)
 
-- [ ] GitHub Actions CI running bats on macOS runners
+- [x] GitHub Actions CI running bats on macOS runners
 - [ ] Tagged GitHub Releases with immutable pinned URLs + baked-in SHA-256
 - [ ] Uninstall command (`goodnight --uninstall`)
 - [ ] Sub-hour timeout units (`--timeout 30m`)
@@ -818,7 +828,7 @@ This project is released under the **MIT License** — see [`LICENSE`](./LICENSE
 - **Apple** — for `pmset`, `caffeinate`, `pgrep`, and the rest of the macOS toolchain this project is built on.
 - **[bats-core](https://github.com/bats-core/bats-core)** — the bash testing framework that makes this project's regression suite possible.
 - **[Anthropic](https://www.anthropic.com/)** — for Claude Code, without which there'd be no "wait for Claude to finish" problem to solve.
-- **Claude Opus 4.7** — which ran the audit → remediation → test → docs cycle that hardened this project into its current shape.
+- **Claude Code** — which assisted the audit → remediation → test → docs cycle that hardened this project into its current shape.
 
 Built with late-night frustration and way too much respect for battery life.
 

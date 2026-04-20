@@ -63,6 +63,7 @@ If you are particularly security-conscious:
 
 - **Pin the installer URL to a specific commit SHA** via `SLEEP_AFTER_CLAUDE_INSTALLER_URL=https://raw.githubusercontent.com/sambatia/sleep-after-claude/<sha>/install-sleep-after-claude.sh`.
 - **Pin the installer SHA-256** via `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256=<hex>`. The installer refuses to proceed if the download doesn't match.
+- Treat the default `curl | bash` path as HTTPS transport trust plus shape validation. The SHA pin is what turns installer-body substitution into a hard failure.
 - **Opt out of automatic `jq` install** by pre-installing `jq` yourself (`brew install jq`); the installer detects existing `jq` and skips the download.
 - **Opt out of Claude Code hook installation** via `SAC_SKIP_HOOK_INSTALL=1`.
 - **Disable the self-update check** via `--skip-update-check` or `SAC_SKIP_UPDATE_CHECK=1`.

@@ -42,6 +42,8 @@ This wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit`, so every comm
 - `shfmt -i 2 -ci` formatting.
 - `shellcheck -S warning` — intentional suppressions must be inline with a reason (e.g., `# shellcheck disable=SC2207 # word-splitting desired for pgrep output`).
 - All user-facing output goes through the `print_*` helpers; TUI prompts go through `ui_*` helpers.
+- Markdown help/log output goes through `ui_markdown`; `gum` and `glow` must remain optional polish layers with plain fallbacks.
+- Comments use concise Bash `#` comments near the function or block they explain. Document contracts, side effects, and safety constraints; avoid comments that restate simple code. See `CLAUDE.md` for the full commenting standard.
 - Section banners (`# ── Section ──`) for navigation in long scripts.
 - No tabs.
 
