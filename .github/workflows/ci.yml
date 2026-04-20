@@ -69,16 +69,15 @@ jobs:
   tests:
     name: bats regression suite
     runs-on: macos-latest
-    # Temporarily non-blocking. All 118 tests pass locally, but 7 fail on
-    # macos-latest due to BSD-vs-GNU utility differences + bats-1.13 `run`
-    # interactions with functions sourced via `sed | process substitution`.
-    # Tracked for follow-up; lint + parity remain required signals.
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install bats-core + jq + modern bash
+        # `jq` + homebrew's bash 5.x are required for several tests that
+        # source functions via process substitution and use jq in
+        # assertions. The stock /usr/bin/bash 3.2 + no-jq macos-latest
+        # runner fails 7/118 without these.
         run: |
           brew update >/dev/null
           brew install bats-core jq bash
