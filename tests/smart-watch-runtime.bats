@@ -85,3 +85,42 @@ setup() {
   assert_contains "$output" "All Claude sessions idle"
   assert_contains "$output" "LOOP_RETURNED"
 }
+
+@test "F-02 runtime: smart mode falls through to completion after idle" {
+  sed 's/^SMART_IDLE_SECONDS=30 /SMART_IDLE_SECONDS=1 /' \
+    "$REPO_ROOT/sleep-after-claude" >"$BATS_TEST_TMPDIR/sac-fast"
+  chmod +x "$BATS_TEST_TMPDIR/sac-fast"
+
+  mkdir -p "$HOME/.claude" "$BUSY_DIR"
+  cat >"$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "Stop": [
+      {
+        "_managed_by": "goodnight",
+        "hooks": [{ "type": "command", "command": "true" }]
+      }
+    ]
+  }
+}
+JSON
+
+  shim pgrep 'exit 1'
+  touch "$BUSY_DIR/session-1"
+  (sleep 1 && rm -f "$BUSY_DIR/session-1") &
+  local cleanup_pid=$!
+
+  run bash "$BATS_TEST_TMPDIR/sac-fast" \
+    --smart \
+    --no-preflight \
+    --skip-update-check \
+    --allow-battery \
+    --dry-run \
+    --no-auto-caffeinate \
+    --no-sound
+  wait "$cleanup_pid" 2>/dev/null || true
+
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "Dry run complete"
+  assert_not_contains "$output" "PID smart not found"
+}

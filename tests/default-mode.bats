@@ -49,6 +49,32 @@ setup() {
   [ "$output" = "NO" ]
 }
 
+@test "F-04: hooks_installed is false without jq even when marker text exists" {
+  sed -n '/^hooks_installed() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude" \
+    >"$BATS_TEST_TMPDIR/helper.sh"
+
+  mkdir -p "$(dirname "$HOME/.claude/settings.json")"
+  cat >"$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "Stop": [
+      { "_managed_by": "goodnight" }
+    ]
+  }
+}
+JSON
+  mkdir -p "$BATS_TEST_TMPDIR/empty-path"
+
+  run bash -c "
+    PATH='$BATS_TEST_TMPDIR/empty-path'
+    CLAUDE_SETTINGS_FILE='$HOME/.claude/settings.json'
+    source '$BATS_TEST_TMPDIR/helper.sh'
+    hooks_installed && echo YES || echo NO
+  "
+
+  [ "$output" = "NO" ]
+}
+
 @test "installer: runs --install-hooks automatically during install" {
   # Fresh sandbox
   unset HOME_BAK

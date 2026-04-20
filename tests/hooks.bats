@@ -25,6 +25,17 @@ setup() {
   assert_contains "$output" "session_id"
 }
 
+@test "F-03: --install-hooks exits non-zero when settings JSON is invalid" {
+  mkdir -p "$(dirname "$CLAUDE_SETTINGS_FILE")"
+  printf '{ invalid json' >"$CLAUDE_SETTINGS_FILE"
+
+  run bash "$REPO_ROOT/sleep-after-claude" --install-hooks
+
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "Could not install goodnight hooks"
+  assert_not_contains "$output" "Installed goodnight hooks"
+}
+
 @test "hooks: F-03 — command contains \$HOME expression, not frozen path" {
   bash "$REPO_ROOT/sleep-after-claude" --install-hooks >/dev/null
   run jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$CLAUDE_SETTINGS_FILE"
@@ -87,6 +98,17 @@ EOF
   [ "$output" = "1" ]
   run jq -r '.hooks.Stop[0].hooks[0].command' "$CLAUDE_SETTINGS_FILE"
   [ "$output" = "echo user-hook" ]
+}
+
+@test "F-03: --uninstall-hooks exits non-zero when settings JSON is invalid" {
+  mkdir -p "$(dirname "$CLAUDE_SETTINGS_FILE")"
+  printf '{ invalid json' >"$CLAUDE_SETTINGS_FILE"
+
+  run bash "$REPO_ROOT/sleep-after-claude" --uninstall-hooks
+
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "Could not remove goodnight hooks"
+  assert_not_contains "$output" "Removed goodnight hooks"
 }
 
 @test "hooks: --uninstall-hooks from a goodnight-only settings.json leaves {} behind" {

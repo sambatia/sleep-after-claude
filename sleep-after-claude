@@ -1341,16 +1341,13 @@ check_for_update() {
 }
 
 # Return 0 if goodnight's hook entries are present in the Claude Code
-# settings file. Uses jq when available, falls back to a grep of the
-# "_managed_by:goodnight" tag.
+# settings file. Smart mode requires jq at hook runtime, so absence of jq
+# means hooks are not operational even if marker text exists in the file.
 hooks_installed() {
   [[ -f "$CLAUDE_SETTINGS_FILE" ]] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
-      "$CLAUDE_SETTINGS_FILE" >/dev/null 2>&1
-  else
-    grep -q '"_managed_by"[[:space:]]*:[[:space:]]*"goodnight"' "$CLAUDE_SETTINGS_FILE" 2>/dev/null
-  fi
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
+    "$CLAUDE_SETTINGS_FILE" >/dev/null 2>&1
 }
 
 # ── Claude Code hook integration ──────────────────────────────
@@ -1414,7 +1411,7 @@ install_claude_hooks() {
   # so reinstalls don't duplicate. Then append the fresh entries.
   local tmp
   tmp="$(mktemp)"
-  jq --arg prompt_cmd "$prompt_cmd" --arg stop_cmd "$stop_cmd" '
+  if ! jq --arg prompt_cmd "$prompt_cmd" --arg stop_cmd "$stop_cmd" '
     # Ensure .hooks exists
     .hooks = (.hooks // {})
     # Strip any prior goodnight-managed entries
@@ -1431,7 +1428,16 @@ install_claude_hooks() {
         _managed_by: "goodnight",
         hooks: [{ type: "command", command: $stop_cmd }]
       }]
-  ' "$CLAUDE_SETTINGS_FILE" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS_FILE"
+  ' "$CLAUDE_SETTINGS_FILE" >"$tmp"; then
+    rm -f "$tmp"
+    print_error "Could not install goodnight hooks: $CLAUDE_SETTINGS_FILE is not valid JSON."
+    return 1
+  fi
+  if ! mv "$tmp" "$CLAUDE_SETTINGS_FILE"; then
+    rm -f "$tmp"
+    print_error "Could not install goodnight hooks: failed to update $CLAUDE_SETTINGS_FILE."
+    return 1
+  fi
 
   print_ok "Installed goodnight hooks into ${BOLD}$CLAUDE_SETTINGS_FILE${RESET}"
   print_step "Busy markers will appear at ${BOLD}$BUSY_DIR${RESET}"
@@ -1451,7 +1457,7 @@ uninstall_claude_hooks() {
   fi
   local tmp
   tmp="$(mktemp)"
-  jq '
+  if ! jq '
     .hooks = (.hooks // {})
     | .hooks.UserPromptSubmit = [ (.hooks.UserPromptSubmit // [])[] | select(._managed_by != "goodnight") ]
     | .hooks.Stop            = [ (.hooks.Stop            // [])[] | select(._managed_by != "goodnight") ]
@@ -1459,7 +1465,16 @@ uninstall_claude_hooks() {
     | if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end
     | if (.hooks.Stop            | length) == 0 then del(.hooks.Stop)            else . end
     | if (.hooks | length) == 0 then del(.hooks) else . end
-  ' "$CLAUDE_SETTINGS_FILE" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS_FILE"
+  ' "$CLAUDE_SETTINGS_FILE" >"$tmp"; then
+    rm -f "$tmp"
+    print_error "Could not remove goodnight hooks: $CLAUDE_SETTINGS_FILE is not valid JSON."
+    return 1
+  fi
+  if ! mv "$tmp" "$CLAUDE_SETTINGS_FILE"; then
+    rm -f "$tmp"
+    print_error "Could not remove goodnight hooks: failed to update $CLAUDE_SETTINGS_FILE."
+    return 1
+  fi
   print_ok "Removed goodnight hooks from ${BOLD}$CLAUDE_SETTINGS_FILE${RESET}"
 }
 
@@ -2033,6 +2048,13 @@ if [[ "$SLEEP_NOW" == true ]]; then
       echo ""
     fi
   fi
+  if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
+    play_sound
+    log_event "DRY_RUN_EXIT (sleep-now)"
+    exit 0
+  fi
   # Release any caffeinate processes already running so macOS is free
   # to sleep. Don't auto-start a new one — we're sleeping immediately.
   # shellcheck disable=SC2207
@@ -2097,9 +2119,13 @@ if [[ "$SMART_WATCH" == true ]]; then
       fi
     fi
   fi
-  ensure_caffeinate_running
-  # shellcheck disable=SC2207
-  INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  if [[ "$DRY_RUN" == true ]]; then
+    INITIAL_CAFF_PIDS=()
+  else
+    ensure_caffeinate_running
+    # shellcheck disable=SC2207
+    INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  fi
 
   echo ""
   echo -e "  ${BOLD}Smart watch${RESET}"
@@ -2134,216 +2160,222 @@ fi
 
 # ── Detect Claude PID ─────────────────────────────────────────
 
-if [[ -z "$TARGET_PID" ]]; then
-  MATCHES="$(find_claude_processes)"
-
-  if [[ -z "$MATCHES" && "$WAIT_FOR_START" == true ]]; then
-    print_step "Waiting for Claude to start..."
-    while [[ -z "$MATCHES" ]]; do
-      sleep 2
-      MATCHES="$(find_claude_processes)"
-    done
-    print_ok "Claude detected."
-  fi
-
-  if [[ -z "$MATCHES" ]]; then
-    print_error "No Claude process found. Is Claude Code running?"
-    print_step "Run ${BOLD}sleep-after-claude --list${RESET} to check what's detectable."
-    print_step "Or use ${BOLD}--wait-for-start${RESET} to wait for Claude to launch."
-    exit 1
-  fi
-
-  MATCH_COUNT="$(echo "$MATCHES" | wc -l | tr -d ' ')"
-  TARGET_PID="$(echo "$MATCHES" | awk 'NR==1{print $1}')"
-  TARGET_CMD="$(echo "$MATCHES" | awk 'NR==1{$1=""; sub(/^ /, ""); print}' | cut -c1-55)"
-
-  if [[ "$MATCH_COUNT" -gt 1 ]]; then
-    print_warn "Multiple Claude processes found — watching the first one:"
-    echo ""
-    echo "$MATCHES" | while IFS= read -r line; do
-      echo -e "    ${DIM}$line${RESET}"
-    done
-    echo ""
-    print_step "Use ${BOLD}--pid <pid>${RESET} to watch a specific one."
-    echo ""
-  fi
-
-  print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
-
-else
-  if ! kill -0 "$TARGET_PID" 2>/dev/null; then
-    print_error "PID $TARGET_PID not found or already exited."
-    exit 1
-  fi
-  TARGET_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null | cut -c1-55 || echo "unknown")"
-  print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
-fi
-
-TARGET_CMD_FULL="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
-# Extract just the binary path (first whitespace-separated token). argv
-# can legitimately mutate at runtime via setproctitle/exec -a/etc., so
-# we compare only the binary for PID-reuse detection — a full-string
-# compare would false-positive on a legitimate argv change and sleep
-# the Mac mid-task.
-TARGET_BIN="$(echo "$TARGET_CMD_FULL" | awk '{print $1}')"
-
-# ── Pre-flight scan + verdict + optional confirmation ─────────
-if [[ "$SKIP_PREFLIGHT" == false ]]; then
-  preflight_scan
-  if [[ "$JSON_OUTPUT" == true ]]; then
-    render_preflight_json
-  else
-    render_preflight
-  fi
-
-  if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
-    log_event "PREFLIGHT_SCAN_FAILED"
-    if [[ "$FORCE" == false ]]; then
-      if [[ "$STDIN_IS_TTY" == true ]]; then
-        if ! ui_confirm "Sleep-blocker scan failed. Proceed anyway?"; then
-          print_warn "Aborted by user. Claude is still running; caffeinate untouched."
-          echo ""
-          exit 0
-        fi
-        echo ""
-      else
-        print_error "Sleep-blocker scan failed and stdin is not a TTY for confirmation."
-        print_step "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
-        exit 1
-      fi
-    else
-      print_warn "Sleep-blocker scan failed but --force was given — proceeding."
-      echo ""
-    fi
-  elif [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
-    log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
-    # Interactive blocker-handling menu: terminate (user apps only),
-    # skip, or abort. --force short-circuits to "skip with warning".
-    if ! prompt_and_handle_blockers; then
-      echo ""
-      exit 0
-    fi
-    echo ""
-  fi
-fi
-
-# ── Ensure caffeinate is running ──────────────────────────────
-# If no caffeinate is active we start one now so the Mac doesn't
-# drift to sleep while we're watching. Skippable with
-# --no-auto-caffeinate for users who manage caffeinate themselves.
-ensure_caffeinate_running
-
-# ── Capture caffeinate PIDs at start ──────────────────────────
-# Captured AFTER ensure_caffeinate_running so any auto-started
-# caffeinate is included and will be released at the end of watch.
-# shellcheck disable=SC2207
-INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
-
-TIMEOUT_SECS=$((TIMEOUT_HOURS * 3600))
-
-echo -e "  ${BOLD}Starting watch${RESET}"
-echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
-print_step "Timeout:  ${BOLD}${TIMEOUT_HOURS}h${RESET}"
-print_step "Delay:    ${BOLD}${DELAY_SECS}s${RESET} before sleep"
-if [[ ${#INITIAL_CAFF_PIDS[@]} -gt 0 ]]; then
-  print_step "Caffeinate PIDs captured: ${BOLD}${INITIAL_CAFF_PIDS[*]}${RESET}"
-else
-  print_warn "No caffeinate processes currently running"
-fi
-[[ "$CAFFEINATE_ONLY" == true ]] && print_step "Mode:     ${BOLD}caffeinate-only${RESET} (will not sleep the Mac)"
-[[ "$DRY_RUN" == true ]] && print_step "Mode:     ${BOLD}dry-run${RESET} (will not sleep the Mac)"
-[[ "$NO_SOUND" == true ]] && print_step "Sound:    ${BOLD}off${RESET}"
-[[ "$NOTIFY" == true ]] && print_step "Notify:   ${BOLD}on${RESET}"
-[[ "$LOG_ENABLED" == true ]] && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
-[[ "$USE_SPINNER" == false ]] && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
-print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
-if [[ "${SMART_WATCH_DONE:-false}" != true ]] && ! hooks_installed; then
-  echo -e "  ${DIM}Tip: Claude Code hooks aren't installed — this watch waits for the${RESET}"
-  echo -e "  ${DIM}process to exit, which an interactive Claude REPL won't do. Run${RESET}"
-  echo -e "  ${DIM}${BOLD}goodnight --install-hooks${RESET}${DIM} once to enable idle-aware detection.${RESET}"
-fi
-echo ""
-
-# F-07: Acquire the watch lock (if smart-mode didn't already — it's
-# idempotent). Prevents concurrent invocations racing on caffeinate
-# and pmset.
 if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
-  if ! acquire_goodnight_lock; then
-    exit 1
+  if [[ -z "$TARGET_PID" ]]; then
+    MATCHES="$(find_claude_processes)"
+
+    if [[ -z "$MATCHES" && "$WAIT_FOR_START" == true ]]; then
+      print_step "Waiting for Claude to start..."
+      while [[ -z "$MATCHES" ]]; do
+        sleep 2
+        MATCHES="$(find_claude_processes)"
+      done
+      print_ok "Claude detected."
+    fi
+
+    if [[ -z "$MATCHES" ]]; then
+      print_error "No Claude process found. Is Claude Code running?"
+      print_step "Run ${BOLD}sleep-after-claude --list${RESET} to check what's detectable."
+      print_step "Or use ${BOLD}--wait-for-start${RESET} to wait for Claude to launch."
+      exit 1
+    fi
+
+    MATCH_COUNT="$(echo "$MATCHES" | wc -l | tr -d ' ')"
+    TARGET_PID="$(echo "$MATCHES" | awk 'NR==1{print $1}')"
+    TARGET_CMD="$(echo "$MATCHES" | awk 'NR==1{$1=""; sub(/^ /, ""); print}' | cut -c1-55)"
+
+    if [[ "$MATCH_COUNT" -gt 1 ]]; then
+      print_warn "Multiple Claude processes found — watching the first one:"
+      echo ""
+      echo "$MATCHES" | while IFS= read -r line; do
+        echo -e "    ${DIM}$line${RESET}"
+      done
+      echo ""
+      print_step "Use ${BOLD}--pid <pid>${RESET} to watch a specific one."
+      echo ""
+    fi
+
+    print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
+
+  else
+    if ! kill -0 "$TARGET_PID" 2>/dev/null; then
+      print_error "PID $TARGET_PID not found or already exited."
+      exit 1
+    fi
+    TARGET_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null | cut -c1-55 || echo "unknown")"
+    print_ok "Watching: ${BOLD}PID $TARGET_PID${RESET} ${DIM}→ $TARGET_CMD${RESET}"
   fi
-fi
-log_event "WATCH_START pid=$TARGET_PID cmd=\"$TARGET_CMD\""
 
-# ── Wait loop ─────────────────────────────────────────────────
-WATCH_STARTED=true
-START_TIME=$(date +%s)
-FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-TICK=0
-TICK_COUNT=0
-ELAPSED=0
-LAST_STATUS_LOG=0
-TIMED_OUT=false
-PID_REUSED=false
+  TARGET_CMD_FULL="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
+  # Extract just the binary path (first whitespace-separated token). argv
+  # can legitimately mutate at runtime via setproctitle/exec -a/etc., so
+  # we compare only the binary for PID-reuse detection — a full-string
+  # compare would false-positive on a legitimate argv change and sleep
+  # the Mac mid-task.
+  TARGET_BIN="$(echo "$TARGET_CMD_FULL" | awk '{print $1}')"
 
-# Skip the kill -0 loop entirely when smart mode already handled the
-# wait — we only need to fall through to the release+sleep sequence.
-while [[ "${SMART_WATCH_DONE:-false}" != true ]] && kill -0 "$TARGET_PID" 2>/dev/null; do
-  if ((TICK_COUNT % 10 == 0)); then
-    NOW=$(date +%s)
-    ELAPSED=$((NOW - START_TIME))
+  # ── Pre-flight scan + verdict + optional confirmation ─────────
+  if [[ "$SKIP_PREFLIGHT" == false ]]; then
+    preflight_scan
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      render_preflight_json
+    else
+      render_preflight
+    fi
+
+    if [[ "$PREFLIGHT_SCAN_OK" != true ]]; then
+      log_event "PREFLIGHT_SCAN_FAILED"
+      if [[ "$FORCE" == false ]]; then
+        if [[ "$STDIN_IS_TTY" == true ]]; then
+          if ! ui_confirm "Sleep-blocker scan failed. Proceed anyway?"; then
+            print_warn "Aborted by user. Claude is still running; caffeinate untouched."
+            echo ""
+            exit 0
+          fi
+          echo ""
+        else
+          print_error "Sleep-blocker scan failed and stdin is not a TTY for confirmation."
+          print_step "Pass ${BOLD}--force${RESET} to proceed anyway, or ${BOLD}--no-preflight${RESET} to skip the scan."
+          exit 1
+        fi
+      else
+        print_warn "Sleep-blocker scan failed but --force was given — proceeding."
+        echo ""
+      fi
+    elif [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
+      log_event "PREFLIGHT_BLOCKERS count=${#PREFLIGHT_BLOCKERS[@]}"
+      # Interactive blocker-handling menu: terminate (user apps only),
+      # skip, or abort. --force short-circuits to "skip with warning".
+      if ! prompt_and_handle_blockers; then
+        echo ""
+        exit 0
+      fi
+      echo ""
+    fi
   fi
 
-  if [[ -n "$TARGET_BIN" ]] && ((TICK_COUNT % 300 == 0)) && ((TICK_COUNT > 0)); then
-    CURRENT_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
-    CURRENT_BIN="$(echo "$CURRENT_CMD" | awk '{print $1}')"
-    if [[ -n "$CURRENT_BIN" && "$CURRENT_BIN" != "$TARGET_BIN" ]]; then
+  # ── Ensure caffeinate is running ──────────────────────────────
+  # If no caffeinate is active we start one now so the Mac doesn't
+  # drift to sleep while we're watching. Skippable with
+  # --no-auto-caffeinate for users who manage caffeinate themselves.
+  if [[ "$DRY_RUN" == true ]]; then
+    INITIAL_CAFF_PIDS=()
+  else
+    ensure_caffeinate_running
+
+    # ── Capture caffeinate PIDs at start ──────────────────────────
+    # Captured AFTER ensure_caffeinate_running so any auto-started
+    # caffeinate is included and will be released at the end of watch.
+    # shellcheck disable=SC2207
+    INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  fi
+
+  TIMEOUT_SECS=$((TIMEOUT_HOURS * 3600))
+
+  echo -e "  ${BOLD}Starting watch${RESET}"
+  echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+  print_step "Timeout:  ${BOLD}${TIMEOUT_HOURS}h${RESET}"
+  print_step "Delay:    ${BOLD}${DELAY_SECS}s${RESET} before sleep"
+  if [[ ${#INITIAL_CAFF_PIDS[@]} -gt 0 ]]; then
+    print_step "Caffeinate PIDs captured: ${BOLD}${INITIAL_CAFF_PIDS[*]}${RESET}"
+  else
+    print_warn "No caffeinate processes currently running"
+  fi
+  [[ "$CAFFEINATE_ONLY" == true ]] && print_step "Mode:     ${BOLD}caffeinate-only${RESET} (will not sleep the Mac)"
+  [[ "$DRY_RUN" == true ]] && print_step "Mode:     ${BOLD}dry-run${RESET} (will not sleep the Mac)"
+  [[ "$NO_SOUND" == true ]] && print_step "Sound:    ${BOLD}off${RESET}"
+  [[ "$NOTIFY" == true ]] && print_step "Notify:   ${BOLD}on${RESET}"
+  [[ "$LOG_ENABLED" == true ]] && print_step "Log:      ${BOLD}${LOG_FILE}${RESET}"
+  [[ "$USE_SPINNER" == false ]] && print_step "TTY:      ${BOLD}non-interactive${RESET} (spinner disabled)"
+  print_step "Press ${BOLD}Ctrl+C${RESET} to cancel"
+  if [[ "${SMART_WATCH_DONE:-false}" != true ]] && ! hooks_installed; then
+    echo -e "  ${DIM}Tip: Claude Code hooks aren't installed — this watch waits for the${RESET}"
+    echo -e "  ${DIM}process to exit, which an interactive Claude REPL won't do. Run${RESET}"
+    echo -e "  ${DIM}${BOLD}goodnight --install-hooks${RESET}${DIM} once to enable idle-aware detection.${RESET}"
+  fi
+  echo ""
+
+  # F-07: Acquire the watch lock (if smart-mode didn't already — it's
+  # idempotent). Prevents concurrent invocations racing on caffeinate
+  # and pmset.
+  if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
+    if ! acquire_goodnight_lock; then
+      exit 1
+    fi
+  fi
+  log_event "WATCH_START pid=$TARGET_PID cmd=\"$TARGET_CMD\""
+
+  # ── Wait loop ─────────────────────────────────────────────────
+  WATCH_STARTED=true
+  START_TIME=$(date +%s)
+  FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  TICK=0
+  TICK_COUNT=0
+  ELAPSED=0
+  LAST_STATUS_LOG=0
+  TIMED_OUT=false
+  PID_REUSED=false
+
+  # Skip the kill -0 loop entirely when smart mode already handled the
+  # wait — we only need to fall through to the release+sleep sequence.
+  while [[ "${SMART_WATCH_DONE:-false}" != true ]] && kill -0 "$TARGET_PID" 2>/dev/null; do
+    if ((TICK_COUNT % 10 == 0)); then
+      NOW=$(date +%s)
+      ELAPSED=$((NOW - START_TIME))
+    fi
+
+    if [[ -n "$TARGET_BIN" ]] && ((TICK_COUNT % 300 == 0)) && ((TICK_COUNT > 0)); then
+      CURRENT_CMD="$(ps -p "$TARGET_PID" -o command= 2>/dev/null || echo "")"
+      CURRENT_BIN="$(echo "$CURRENT_CMD" | awk '{print $1}')"
+      if [[ -n "$CURRENT_BIN" && "$CURRENT_BIN" != "$TARGET_BIN" ]]; then
+        clear_line
+        print_warn "PID $TARGET_PID was reused by another process — treating as finished."
+        log_event "PID_REUSED pid=$TARGET_PID was=\"$TARGET_CMD_FULL\" now=\"$CURRENT_CMD\""
+        PID_REUSED=true
+        break
+      fi
+    fi
+
+    if [[ $ELAPSED -ge $TIMEOUT_SECS ]]; then
       clear_line
-      print_warn "PID $TARGET_PID was reused by another process — treating as finished."
-      log_event "PID_REUSED pid=$TARGET_PID was=\"$TARGET_CMD_FULL\" now=\"$CURRENT_CMD\""
-      PID_REUSED=true
+      print_warn "Timeout of ${TIMEOUT_HOURS}h reached — forcing sleep anyway."
+      TIMED_OUT=true
       break
     fi
-  fi
 
-  if [[ $ELAPSED -ge $TIMEOUT_SECS ]]; then
-    clear_line
-    print_warn "Timeout of ${TIMEOUT_HOURS}h reached — forcing sleep anyway."
-    TIMED_OUT=true
-    break
-  fi
-
-  if [[ "$USE_SPINNER" == true ]]; then
-    # Static format; all dynamics go through %s so stray `%` can't
-    # corrupt the format string (same safety pattern as wait_for_ac_power).
-    printf "\r  %s%s%s  %sWaiting for PID %s…%s  %s elapsed     " \
-      "$CYAN" "${FRAMES[$TICK]}" "$RESET" \
-      "$DIM" "$TARGET_PID" "$RESET" \
-      "$(elapsed_label "$ELAPSED")"
-  else
-    if ((ELAPSED - LAST_STATUS_LOG >= 300)); then
-      echo "  … still waiting for PID $TARGET_PID ($(elapsed_label $ELAPSED) elapsed)"
-      LAST_STATUS_LOG=$ELAPSED
+    if [[ "$USE_SPINNER" == true ]]; then
+      # Static format; all dynamics go through %s so stray `%` can't
+      # corrupt the format string (same safety pattern as wait_for_ac_power).
+      printf "\r  %s%s%s  %sWaiting for PID %s…%s  %s elapsed     " \
+        "$CYAN" "${FRAMES[$TICK]}" "$RESET" \
+        "$DIM" "$TARGET_PID" "$RESET" \
+        "$(elapsed_label "$ELAPSED")"
+    else
+      if ((ELAPSED - LAST_STATUS_LOG >= 300)); then
+        echo "  … still waiting for PID $TARGET_PID ($(elapsed_label $ELAPSED) elapsed)"
+        LAST_STATUS_LOG=$ELAPSED
+      fi
     fi
+
+    TICK=$(((TICK + 1) % ${#FRAMES[@]}))
+    TICK_COUNT=$((TICK_COUNT + 1))
+    micro_sleep 0.1
+  done
+
+  clear_line
+  WATCH_STARTED=false
+
+  if [[ "$TIMED_OUT" == false && "$PID_REUSED" == false ]]; then
+    TOTAL_ELAPSED=$(($(date +%s) - START_TIME))
+    print_ok "Process ${BOLD}PID $TARGET_PID${RESET} finished after $(elapsed_label $TOTAL_ELAPSED)"
+    log_event "CLAUDE_FINISHED pid=$TARGET_PID elapsed=${TOTAL_ELAPSED}s"
+    notify_macos "Claude finished after $(elapsed_label $TOTAL_ELAPSED)"
+  elif [[ "$TIMED_OUT" == true ]]; then
+    log_event "TIMEOUT pid=$TARGET_PID after ${TIMEOUT_HOURS}h"
+    notify_macos "Claude timeout reached — forcing sleep"
+  else
+    notify_macos "Claude PID reused — proceeding with sleep"
   fi
-
-  TICK=$(((TICK + 1) % ${#FRAMES[@]}))
-  TICK_COUNT=$((TICK_COUNT + 1))
-  micro_sleep 0.1
-done
-
-clear_line
-WATCH_STARTED=false
-
-if [[ "$TIMED_OUT" == false && "$PID_REUSED" == false ]]; then
-  TOTAL_ELAPSED=$(($(date +%s) - START_TIME))
-  print_ok "Process ${BOLD}PID $TARGET_PID${RESET} finished after $(elapsed_label $TOTAL_ELAPSED)"
-  log_event "CLAUDE_FINISHED pid=$TARGET_PID elapsed=${TOTAL_ELAPSED}s"
-  notify_macos "Claude finished after $(elapsed_label $TOTAL_ELAPSED)"
-elif [[ "$TIMED_OUT" == true ]]; then
-  log_event "TIMEOUT pid=$TARGET_PID after ${TIMEOUT_HOURS}h"
-  notify_macos "Claude timeout reached — forcing sleep"
-else
-  notify_macos "Claude PID reused — proceeding with sleep"
 fi
 
 # ── Re-scan assertions only (lightweight, no full rescan needed) ──
@@ -2352,6 +2384,14 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
   if [[ ${#PREFLIGHT_BLOCKERS[@]} -gt 0 ]]; then
     print_post_watch_blockers
   fi
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+  echo ""
+  print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
+  play_sound
+  log_event "DRY_RUN_EXIT"
+  exit 0
 fi
 
 # ── Release caffeinate ────────────────────────────────────────
@@ -2391,13 +2431,6 @@ fi
 
 # ── Early exits ───────────────────────────────────────────────
 echo ""
-
-if [[ "$DRY_RUN" == true ]]; then
-  print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
-  play_sound
-  log_event "DRY_RUN_EXIT"
-  exit 0
-fi
 
 if [[ "$CAFFEINATE_ONLY" == true ]]; then
   print_done "Caffeinate released. Mac will sleep on its own idle timer."
