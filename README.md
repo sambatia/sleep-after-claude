@@ -4,7 +4,7 @@
 
 ![macOS](https://img.shields.io/badge/platform-macOS-silver)
 ![Shell](https://img.shields.io/badge/made%20with-Bash-1f425f.svg)
-![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-bats--core-brightgreen)
 ![License](https://img.shields.io/badge/license-Unlicensed-lightgrey)
 ![Last commit](https://img.shields.io/github/last-commit/sambatia/sleep-after-claude)
 ![Open issues](https://img.shields.io/github/issues/sambatia/sleep-after-claude)
@@ -118,28 +118,37 @@ AI coding assistants like **Claude Code** are becoming the workhorse of serious 
 
 ```mermaid
 flowchart LR
-  A[User runs 'goodnight'] --> B[Find Claude Code PID]
-  B --> C{Preflight scan}
-  C -->|Scan OK, no blockers| D[Watch PID in loop]
-  C -->|Scan failed OR blockers| E{User confirms?}
-  E -->|Yes or --force| D
+  A[User runs 'goodnight'] --> P{On battery?}
+  P -->|Yes| W[Wait for AC]
+  W --> U[Self-update check]
+  P -->|No / AC| U
+  U --> M{Hooks installed?}
+  M -->|Yes| S[--smart: watch busy markers]
+  M -->|No| D[--watch-pid: watch claude PID]
+  S --> C{Preflight clear?}
+  D --> C
+  C -->|Scan failed or blockers| E{User confirms?}
+  E -->|Yes or --force| L[Acquire concurrent-run lock]
   E -->|No| X[Abort — Mac stays awake]
-  D -->|Claude still running| D
-  D -->|Claude exited| F[Release caffeinate]
+  C -->|Clear| L
+  L --> WL[Watch loop]
+  WL -->|Idle / Claude exited| F[Release caffeinate]
   F --> G[pmset sleepnow]
   G --> Z((💤 Mac sleeps))
 ```
 
-**Step-by-step walkthrough:**
+**Step-by-step walkthrough (default flow):**
 
-1️⃣ You type `goodnight` in your terminal after starting a Claude Code task.
-2️⃣ goodnight scans the running processes on your Mac and finds the `claude` or `claude-code` process to watch.
-3️⃣ It runs a **preflight audit** — checking whether anything else on your Mac would block sleep (backup jobs, screen-sharing, USB devices, etc.).
-4️⃣ If everything looks clear, it starts a quiet watch loop that checks every 100 milliseconds whether Claude is still running.
-5️⃣ When Claude exits, goodnight releases any `caffeinate` helpers (macOS's "stay awake" system) that might be holding the Mac awake.
-6️⃣ It issues the macOS system command `pmset sleepnow` to initiate sleep.
-7️⃣ Your Mac transitions into sleep mode within one second.
-8️⃣ The full sequence of events is written to `~/.local/state/sleep-after-claude.log` (if you enabled `--log`) so you can review it in the morning.
+1️⃣ You type `goodnight` in your terminal.
+2️⃣ If you're on battery, goodnight shows a "please plug in" card and waits for the charger. Skip with `--allow-battery`.
+3️⃣ Once per 24 hours, goodnight does a quick SHA-256 comparison against the remote script and offers to update. Skip with `--skip-update-check`.
+4️⃣ If Claude Code hooks are installed, goodnight runs in **smart mode** — watching the busy-marker directory populated by those hooks. Otherwise it falls back to watching a specific `claude` PID.
+5️⃣ It runs a **preflight audit** — checking whether anything else on your Mac would block sleep (backup jobs, screen-sharing, USB devices, etc.).
+6️⃣ If everything looks clear, goodnight acquires a mutual-exclusion lock (so two concurrent `goodnight` invocations can't race) and starts watching.
+7️⃣ When all Claude sessions go idle (smart mode) or the watched process exits (watch-pid mode), goodnight releases any `caffeinate` helpers.
+8️⃣ It issues `pmset sleepnow` to initiate sleep.
+9️⃣ Your Mac transitions into sleep mode within one second.
+🔟 The full sequence of events is written to `~/.local/state/sleep-after-claude.log` (if you enabled `--log`). Render it later with `goodnight --log-summary`.
 
 ---
 
@@ -150,14 +159,19 @@ flowchart LR
 | Component | Technology | What It Does (Plain English) | Why We Chose It |
 |---|---|---|---|
 | **Core tool** | Bash script (`sleep-after-claude`) | The single file that does all the work — watches, audits, sleeps your Mac | Bash ships on every Mac. Zero install step, zero runtime dependency |
-| **Installer** | Self-extracting Bash (`install-sleep-after-claude.sh`) | The file that `curl | bash` downloads. It extracts the tool to `~/bin` and wires up the `goodnight` alias | A single-file installer users can read before running |
-| **Process detection** | macOS `pgrep` + `ps` | Finds the running Claude Code process by name | Built into macOS — no new dependency |
+| **Installer** | Self-extracting Bash (`install-sleep-after-claude.sh`) | The file that `curl | bash` downloads. Extracts the tool to `~/bin`, wires up the `goodnight` alias, SHA-pins and installs `jq`, and sets up Claude Code hooks | A single-file installer users can read before running |
+| **Claude Code hooks** | `~/.claude/settings.json` + `jq` | Populates a busy-marker directory so `--smart` mode can detect idle sessions without waiting for the `claude` process to exit | Works for interactive REPLs; doesn't rely on any public Claude Code API |
+| **Process detection** | macOS `pgrep` + `ps` | Finds the running Claude Code process by name (used by `--watch-pid`, `--list`) | Built into macOS — no new dependency |
 | **Sleep predictor** | macOS `pmset -g assertions` | Reads the OS's list of "things that want to stay awake" so we can predict whether sleep will succeed | Official Apple API, machine-parseable |
+| **Power gate** | macOS `pmset -g batt` | Waits for AC before spending battery on a long watch; shows a styled "plug me in" panel while waiting | Protects laptop battery without surprising the user |
 | **Sleep trigger** | macOS `pmset sleepnow` (with `osascript` fallback) | The command that actually puts the Mac to sleep | Official, supported, no flags or tricks |
-| **Shell integration** | Your `~/.zshrc` or `~/.bash_profile` | Adds the `goodnight` alias so you can type one word | Standard shell practice |
+| **Self-update** | `curl` + `shasum` + `exec` | Once per 24h, compares local ↔ remote SHA-256 and re-execs into the new binary preserving argv | Fails open; never blocks offline users |
+| **Concurrent-run lock** | `mkdir`-as-atomic-lock at `~/.local/state/goodnight/lock` | Prevents two concurrent `goodnight` invocations from racing on caffeinate release and `pmset sleepnow` | macOS bash has no `flock`; `mkdir` is atomic across processes |
+| **Shell integration** | Your `~/.zshrc` or `~/.bash_profile` | Adds the `goodnight` alias + `~/bin` on `PATH` | Standard shell practice |
+| **Optional TUI polish** | [`gum`](https://github.com/charmbracelet/gum) / [`glow`](https://github.com/charmbracelet/glow) | Prettier confirm prompts, menus, panels, and markdown rendering when installed; silent fallback otherwise | Strictly optional — nothing breaks without them |
 | **Test runner** | [bats-core](https://github.com/bats-core/bats-core) | Runs the regression test suite | De-facto standard for bash testing |
-| **Parity guard** | `scripts/check-parity.sh` | Verifies the installer and the standalone script never drift apart | Custom, 30 lines of bash, auditable |
-| **Logging** | Append-only text file | Writes a record of every important event to `~/.local/state/sleep-after-claude.log` | Simple, durable, greppable |
+| **Parity guard** | `scripts/check-parity.sh` | Verifies the installer's embedded payload never drifts from the standalone script | Custom, tiny, auditable |
+| **Logging** | Append-only text file | Writes a record of every important event to `~/.local/state/sleep-after-claude.log` | Simple, durable, greppable (category-groupable via `--log-summary`) |
 
 ### The Big Picture
 
@@ -229,11 +243,15 @@ Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_
 
 #### 🎯 Core behavior
 
+- [x] **Smart-mode idle detection** — `--smart` (default when Claude Code hooks are installed) sleeps the Mac when every Claude session has returned to idle, not when the `claude` process exits. Works for interactive REPLs.
+- [x] **Process-exit watching** — `--watch-pid` (default when hooks aren't installed) sleeps when the `claude` process dies. Use for non-interactive Claude invocations.
+- [x] **Sleep-now shortcut** — `--sleep-now` skips detection entirely: preflight + handle blockers + sleep immediately.
 - [x] **Auto-detect Claude Code process** — uses a two-tier `pgrep` scan that avoids false-positives from Electron-based apps.
 - [x] **Watch loop with low CPU usage** — uses Bash's built-in `read` with a FIFO to avoid forking `/bin/sleep` every tick.
 - [x] **Configurable grace delay** — `--delay <seconds>` for a gentle buffer before sleep.
 - [x] **Maximum-time safety net** — `--timeout <hours>` forces sleep after N hours (default 6) even if Claude is somehow stuck.
 - [x] **PID-reuse detection** — compares the binary path every 30 seconds to catch PID recycling without false-flagging legitimate argv changes.
+- [x] **Concurrent-run lock** — two goodnight invocations can't race on caffeinate release; the second one refuses and points at the live holder's PID.
 
 #### 🧪 Audit & inspection
 
@@ -248,10 +266,26 @@ Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_
 
 - [x] **Dry-run** — `--dry-run` does everything except actually sleep the Mac.
 - [x] **Caffeinate-only** — `--caffeinate-only` releases caffeinate but lets macOS handle sleep on its own idle timer.
+- [x] **Auto-start caffeinate** — `--no-auto-caffeinate` opts out when you manage caffeinate yourself.
+- [x] **Power-state gate** — on battery, goodnight waits for the charger to be plugged in before kicking off a long watch. `--allow-battery` (or `--force`) bypasses.
 - [x] **Skip preflight** — `--no-preflight` for when you've already audited your system.
-- [x] **Force mode** — `--force` bypasses confirmation when blockers are detected.
+- [x] **Force mode** — `--force` (a.k.a. `--yes` / `-y`) bypasses confirmation prompts.
 - [x] **Wait for Claude to start** — `--wait-for-start` polls for a Claude process to launch before watching.
 - [x] **Custom PID** — `--pid <pid>` watches any arbitrary process, not just Claude.
+
+#### 🔄 Self-update
+
+- [x] **Once-per-24h update check** — compares the local script's SHA-256 to the remote canonical script; prompts on mismatch.
+- [x] **Exec-into-new-binary** — after an in-place update accepted mid-session, goodnight `exec`s the fresh script with your original arguments preserved.
+- [x] **Fails open** — offline, rate-limited, or non-TTY contexts silently skip; never blocks normal use.
+- [x] **Manual bypass / force** — `--skip-update-check` suppresses the check entirely; `--check-update` busts the 24h cache.
+
+#### 🪝 Claude Code hook integration
+
+- [x] **Zero-touch installer** — `~/.claude/settings.json` is populated with `UserPromptSubmit` and `Stop` hooks during install (unless `SAC_SKIP_HOOK_INSTALL=1`).
+- [x] **Opt-out / manual install** — `goodnight --install-hooks` / `--uninstall-hooks` work at any time, idempotently. Existing user-defined hooks are preserved.
+- [x] **Survives home-dir moves** — hook command strings lazy-expand `$HOME` at hook-runtime, not at install-time.
+- [x] **Stale-marker reaper** — busy markers older than 24h (override via `SAC_STALE_MARKER_MINUTES`) are reaped automatically; short thresholds won't accidentally reap long-running Claude tasks.
 
 #### 📢 Notifications & logging
 
@@ -259,6 +293,7 @@ Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_
 - [x] **Completion sound** — plays `/System/Library/Sounds/Glass.aiff` on finish (`--no-sound` to disable).
 - [x] **Append-only log** — `--log` records every event to `~/.local/state/sleep-after-claude.log`.
 - [x] **Custom log path** — `--log-file <path>` redirects events elsewhere.
+- [x] **Pretty log summary** — `--log-summary` groups events by category and renders via `glow` (falls back to plain text).
 - [x] **Warn-once on log-write failure** — you'll see a stderr warning the first time logging breaks, then silent.
 
 #### 🛡️ Installer safety
@@ -267,15 +302,19 @@ Passing `--json` emits a machine-readable preflight report. The `scan_ok`, `can_
 - [x] **Size envelope check** — rejects payloads smaller than 2KB or larger than 512KB (defends against HTML error pages).
 - [x] **Marker verification** — refuses to proceed without `__SCRIPT_START__` / `__SCRIPT_END__` tags.
 - [x] **Optional SHA-256 pin** — `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256` verifies the download against a known hash.
+- [x] **SHA-pinned `jq` auto-install** — the installer fetches a static `jq` binary from `github.com/jqlang/jq`, checks its SHA-256 against a pinned hash per arch, and refuses mismatches. Override via `SAC_JQ_SHA256`.
+- [x] **Bounded stdin drain** — the piped-install exit path drains the rest of its own stdin behind a 5s watchdog so `curl | bash && next_cmd` chains don't hang if the CDN trickles.
 - [x] **Alias dedupe on reinstall** — stale alias lines pointing to old paths are stripped before the fresh line is appended.
+- [x] **PATH dedupe** — the installer won't accumulate duplicate `~/bin` entries on repeat runs.
 - [x] **Unknown-shell gating** — fish / nushell users get explicit manual instructions instead of a silent fallback to `~/.zshrc`.
+- [x] **Hook-install opt-out** — `SAC_SKIP_HOOK_INSTALL=1` suppresses the `~/.claude/settings.json` modification; installer announces clearly before touching it.
 - [x] **Exit non-zero on verification fail** — `curl | bash && next_command` chains won't proceed with a broken install.
 
 #### 🧪 Quality
 
-- [x] **Full bats regression test suite** — 31 tests covering every audit-cycle finding.
+- [x] **Full bats regression test suite** — one file per risk area, covering every finding from both audit cycles. Live count via `bats tests/ --count`.
 - [x] **Parity guard** — script that enforces the installer and standalone script match byte-for-byte.
-- [x] **Opt-in pre-commit hook** — runs parity automatically when you stage changes.
+- [x] **Pre-commit framework integration** — `.pre-commit-config.yaml` runs parity + shellcheck + shfmt + hygiene on every commit.
 
 #### 🗺️ Planned
 
@@ -316,8 +355,10 @@ curl -fsSL https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/in
 2. Verifies you're on macOS.
 3. Creates `~/bin` if it doesn't exist (this is a standard "my personal tools" folder).
 4. Extracts the `sleep-after-claude` program into `~/bin/sleep-after-claude`.
-5. Adds a `goodnight` alias to your shell's config file (`~/.zshrc` or `~/.bash_profile`).
-6. Runs a quick health check to make sure the install worked.
+5. Adds a `goodnight` alias to your shell's config file (`~/.zshrc` or `~/.bash_profile`) and makes sure `~/bin` is on your `PATH`.
+6. Auto-installs `jq` into `~/bin/jq` if it isn't already on your machine (SHA-pinned, so a tampered mirror is refused).
+7. Installs Claude Code hooks into `~/.claude/settings.json` so `--smart` idle detection works on first run. Skip this step with `SAC_SKIP_HOOK_INSTALL=1`.
+8. Runs a quick health check to make sure the install worked.
 
 When it finishes, you'll see: **"Installation complete 🌙"**.
 
@@ -339,8 +380,15 @@ goodnight needs zero configuration for normal use. These are optional knobs:
 |---|---|---|---|
 | `SLEEP_AFTER_CLAUDE_INSTALLER_URL` | No | Override the installer source URL (useful for pinning to a commit SHA) | `https://raw.githubusercontent.com/sambatia/sleep-after-claude/abc123.../install-sleep-after-claude.sh` |
 | `SLEEP_AFTER_CLAUDE_INSTALLER_SHA256` | No | Require the downloaded installer to match a specific SHA-256 | `a41a6cfe20b6d4929cff4a5db00ad0c6...` |
+| `SLEEP_AFTER_CLAUDE_UPDATE_URL` | No | Override the self-update source URL (same format as installer URL) | main-branch raw URL |
+| `SAC_JQ_SHA256` | No | Override the expected SHA-256 for the auto-installed `jq` binary (for legitimate jq re-releases) | 64-hex hash |
+| `SAC_SKIP_HOOK_INSTALL` | No | Set to `1` to tell the installer not to modify `~/.claude/settings.json` | `1` |
+| `SAC_SKIP_UPDATE_CHECK` | No | Set to `1` to tell the tool not to check for updates on startup (equivalent to `--skip-update-check`) | `1` |
+| `SAC_STALE_MARKER_MINUTES` | No | Override the stale-marker reaper threshold in `--smart` mode (default 1440 = 24h) | `720` |
+| `SAC_NO_GUM` / `SAC_FORCE_GUM` | No | Force-off / force-on the `gum` TUI integration | `1` |
+| `SAC_NO_GLOW` | No | Force-off the `glow` markdown-rendering integration | `1` |
 
-There are no API keys, database URLs, or secrets. goodnight doesn't talk to any server after install.
+There are no API keys, database URLs, or secrets. goodnight doesn't talk to any server after install (except the once-per-24h self-update check, which can be disabled).
 
 ### Running It
 
@@ -361,12 +409,19 @@ Close your laptop lid, walk away, go to bed. When Claude finishes, the Mac sleep
 ### Useful variants
 
 ```bash
+goodnight                      # Smart mode (if hooks are installed) or PID-watch (if not)
+goodnight --smart              # Force smart mode (fails if hooks aren't installed)
+goodnight --watch-pid          # Force legacy PID-exit watching
+goodnight --sleep-now          # Skip the watch — preflight + sleep immediately
 goodnight --preflight          # Just audit your system, don't watch or sleep
 goodnight --dry-run            # Watch and detect, but don't actually sleep
 goodnight --notify --log       # macOS notification + audit log
 goodnight --pid 12345          # Watch a specific PID
 goodnight --wait-for-start     # Wait for Claude to launch, then watch
 goodnight --json --preflight   # Machine-readable output
+goodnight --log-summary        # Render the session log as pretty markdown
+goodnight --install-hooks      # Set up Claude Code hooks for --smart mode
+goodnight --check-update       # Force an update check now (bypass the 24h cache)
 ```
 
 <details>
@@ -420,6 +475,36 @@ The installer skips the alias step and tells you the manual line to add. For fis
 alias goodnight "$HOME/bin/sleep-after-claude"
 ```
 
+---
+
+**"--smart mode can't detect idle sessions"**
+
+You ran `goodnight --smart` but the Claude Code hooks aren't installed in `~/.claude/settings.json`. Run `goodnight --install-hooks` once, then restart any open Claude Code sessions so they pick up the new hooks. Alternatively, use `goodnight --watch-pid` to fall back to process-exit watching.
+
+---
+
+**"Waiting for a Claude prompt…" in --smart mode and it never proceeds**
+
+Your Claude Code session started before the hooks were installed, so it isn't emitting busy markers. Quit and restart the session, or use `--watch-pid` / `--sleep-now` for this invocation.
+
+---
+
+**"Another goodnight is already running (PID X)"**
+
+A previous `goodnight` invocation is still holding the concurrent-run lock. Either wait for it to finish or `kill X`. Stale locks (dead holder PID) are auto-reclaimed on the next attempt.
+
+---
+
+**"Please connect your charger" panel when you want to proceed on battery**
+
+goodnight waits for AC power by default to protect your laptop battery. Pass `--allow-battery` (or `--force`) to bypass.
+
+---
+
+**goodnight wants to update mid-session and you don't want it to**
+
+Pass `--skip-update-check`, or set `SAC_SKIP_UPDATE_CHECK=1` in your environment.
+
 </details>
 
 ---
@@ -433,19 +518,14 @@ goodnight/
 ├── scripts/
 │   └── check-parity.sh                 # Verifies installer payload matches standalone
 ├── .githooks/
-│   └── pre-commit                      # Opt-in: runs parity check on commit
-├── tests/
-│   ├── parity.bats                     # Parity-guard regression tests
-│   ├── installer-trust-chain.bats      # Installer size/marker/SHA256 tests
-│   ├── preflight-fail-closed.bats      # Preflight fail-closed tests
-│   ├── installer-alias-and-shell.bats  # Alias dedupe / shell gating tests
-│   ├── log-event.bats                  # Log warn-once tests
-│   ├── pid-reuse-compare.bats          # PID-reuse binary-compare tests
+│   └── pre-commit                      # Legacy parity hook (superseded by pre-commit framework)
+├── .pre-commit-config.yaml             # Canonical lint pipeline (parity + shellcheck + shfmt + hygiene)
+├── tests/                              # bats-core regression suite — one file per risk area
+│   ├── *.bats                          # see "What the tests cover" table below
 │   ├── lib/
-│   │   └── common.bash                 # Shared test helpers (sandbox, shims)
+│   │   └── common.bash                 # Shared helpers (sandbox, shims, asserts)
 │   └── fixtures/
-│       ├── pmset-assertions-clear.txt  # Real pmset output, no blockers
-│       └── pmset-assertions-with-blocker.txt  # Blocker case for tests
+│       └── pmset-assertions-*.txt      # Real captured pmset output for shimmed tests
 ├── README.md                           # This file
 └── CLAUDE.md                           # Agent + architecture knowledge
 ```
@@ -454,8 +534,8 @@ goodnight/
 
 | Path | Purpose |
 |---|---|
-| `sleep-after-claude` | The actual tool users run. ~1050 lines of Bash. |
-| `install-sleep-after-claude.sh` | The installer users `curl | bash`. Embeds a byte-identical copy of `sleep-after-claude` between marker lines. |
+| `sleep-after-claude` | The actual tool users run. Single-file Bash script with labeled section banners (`# ── Section ──`). Run `bash -n` to syntax-check. |
+| `install-sleep-after-claude.sh` | The installer users `curl | bash`. Embeds a byte-identical copy of `sleep-after-claude` between marker lines. Also auto-installs `jq` (SHA-pinned) and Claude Code hooks unless opted out. |
 | `scripts/check-parity.sh` | Extracts the embedded payload and diffs it against the standalone. Exits 0 on match, non-zero with diff on drift. |
 | `.githooks/pre-commit` | Legacy parity-only hook. Superseded by the `pre-commit` framework below. |
 | `.pre-commit-config.yaml` | Canonical pre-commit config. Enable with `pre-commit install`. Runs parity + shellcheck + shfmt + repo hygiene on every commit. |
@@ -473,25 +553,52 @@ goodnight/
 
 If you're looking for the command-line flags (goodnight's equivalent of an API), they are:
 
+**Watch modes** (default selection: `--smart` when Claude Code hooks are installed, `--watch-pid` otherwise)
+
 | Flag | Short | Description |
 |---|---|---|
-| `--help` | `-h` | Show help and exit |
+| `--smart` | — | Hook-based idle detection — sleep when all Claude sessions have returned to idle. Requires `--install-hooks` to have been run once. |
+| `--watch-pid` | — | Legacy process-exit watching — sleep when the `claude` process dies. Use when running Claude non-interactively. |
+| `--sleep-now` | — | Skip the watch entirely. Preflight + handle blockers + sleep immediately. |
+
+**Watch options**
+
+| Flag | Short | Description |
+|---|---|---|
 | `--pid <pid>` | `-p <pid>` | Watch a specific process ID instead of auto-detecting |
 | `--timeout <hrs>` | `-t <hrs>` | Force sleep after N hours (default 6) |
 | `--delay <secs>` | `-d <secs>` | Grace period before sleeping (default 1) |
 | `--wait-for-start` | — | Poll until a Claude process launches |
 | `--caffeinate-only` | — | Release caffeinate but don't sleep the Mac |
+| `--no-auto-caffeinate` | — | Don't auto-start `caffeinate -dim` when none is running |
 | `--dry-run` | — | Simulate (detect + wait, but don't sleep) |
+| `--allow-battery` | — | Proceed even if the Mac is on battery (default: wait for AC) |
+
+**Hook management**
+
+| Flag | Short | Description |
+|---|---|---|
+| `--install-hooks` | — | Install Claude Code hooks into `~/.claude/settings.json` so `--smart` can detect idle sessions |
+| `--uninstall-hooks` | — | Remove goodnight's Claude Code hooks, leaving any user-defined hooks in place |
+
+**Inspection & output**
+
+| Flag | Short | Description |
+|---|---|---|
 | `--list` | `-l` | Show what processes would be watched |
 | `--preflight` | `-P` | Run preflight scan and exit |
 | `--no-preflight` | — | Skip the preflight scan |
-| `--force` | `-f` | Skip confirmation prompts on blockers |
+| `--log-summary` | — | Render the session log as pretty markdown (via `glow` if installed) |
+| `--force` | `-f` / `--yes` / `-y` | Skip confirmation prompts on blockers and battery |
 | `--brief` | `-b` | Terse preflight output (just the verdict) |
 | `--json` | — | Emit preflight as JSON |
 | `--no-sound` | — | Skip the completion sound |
 | `--notify` | `-n` | Send a macOS notification when done |
 | `--log` | — | Write events to the log file |
 | `--log-file <path>` | — | Custom log path (implies `--log`) |
+| `--check-update` | — | Force an immediate update check (bypasses the 24h cache) |
+| `--skip-update-check` | — | Don't check for a newer version on startup |
+| `--help` | `-h` | Show help and exit |
 
 ### JSON output schema
 
@@ -538,11 +645,26 @@ brew install bats-core
 | Test file | What it protects |
 |---|---|
 | `parity.bats` | Parity guard passes clean, fails on drift, fails on missing markers |
-| `installer-trust-chain.bats` | Piped install: warn message, size envelope, marker check, SHA-256 pin (match + mismatch), README documents escape hatches |
-| `preflight-fail-closed.bats` | `scan_ok=false` + `can_sleep=null` on pmset failure; correct values on clear/blocker fixtures; JSON always valid |
+| `installer-trust-chain.bats` | Piped install: warn message, size envelope, marker check, SHA-256 pin (match + mismatch) |
+| `installer-consent-and-exec.bats` | Installer hook-install opt-out + self-update re-exec contract |
 | `installer-alias-and-shell.bats` | Fresh install = one alias; reinstall replaces stale alias; fish shell skips alias; verification failure exits non-zero |
+| `installer-deps.bats` | `jq` auto-install: already-installed short-circuit, offline-safe degradation, presence of `ensure_jq` guards |
+| `installer-jq-rejection.bats` | `jq` SHA-256 mismatch → hard refusal; matching hash allows install |
+| `preflight-fail-closed.bats` | `scan_ok=false` + `can_sleep=null` on pmset failure; correct values on clear/blocker fixtures; JSON always valid |
+| `blocker-classification.bats` | Severity-bucket assignment + interactive termination hint rendering |
+| `power-gate.bats` | Battery vs AC vs Unknown power-state handling with a shimmed `pmset` |
+| `auto-caffeinate.bats` | `ensure_caffeinate_running` leaves existing caffeinate alone, starts one when missing, respects `--no-auto-caffeinate` |
+| `hooks.bats` | `--install-hooks` / `--uninstall-hooks` idempotency; smart-watch primitive |
+| `hook-command-runtime.bats` | Hook command strings evaluate correctly in a fresh shell with an arbitrary `$HOME` (F-03 runtime) |
+| `smart-watch-semantics.bats` | Cold-start guard, idle countdown, busy-marker state transitions (F-01 / F-08) |
+| `smart-watch-runtime.bats` | Full `smart_watch_loop` behavior driven with scripted `BUSY_DIR` |
+| `default-mode.bats` | Default-mode selection: `--smart` when hooks installed, `--watch-pid` otherwise |
+| `concurrent-lock.bats` | Lock acquire / stale-lock reclaim / release contract (F-07) |
+| `concurrent-lock-runtime.bats` | Two real racing bash subprocesses — exactly one wins |
+| `trap-and-drain.bats` | `on_interrupt` doesn't double-call cleanup (F-12); installer stdin drain bounded (F-11) |
+| `update-check.bats` | Self-update rate-limit, fail-open, TTY prompt, re-exec contract |
 | `log-event.bats` | Write success; warn-once on first failure; silent when disabled; no raw shell error leak |
-| `pid-reuse-compare.bats` | Binary extraction correctness; argv mutation doesn't trigger reuse; different binary does trigger reuse |
+| `pid-reuse-compare.bats` | Binary extraction correctness; argv mutation doesn't trigger reuse; different binary does trigger reuse (F-10) |
 
 ### How to read the output
 
@@ -605,16 +727,29 @@ A line starting with `ok` passed; `not ok` failed (with an error trace). The num
 - [x] Unknown-shell gating
 - [x] Log-write warn-once
 - [x] PID-reuse binary-only compare
-- [x] Full bats regression suite (31 tests)
+- [x] Full bats regression suite
 
-### Phase 3 — Operational polish 👈 (Current focus)
+### Phase 3 — Smart-mode & operational polish ✅ (Shipped — 2026-04-20)
+
+- [x] Claude Code hook integration (`--install-hooks` / `--uninstall-hooks`)
+- [x] `--smart` idle-based watch as the default when hooks are present
+- [x] `--sleep-now` fast path for "sleep immediately, don't wait"
+- [x] Self-update check with exec-into-new-binary (rate-limited to 24h)
+- [x] Concurrent-run mutual-exclusion lock
+- [x] Power-state gate (waits for AC by default; `--allow-battery` override)
+- [x] Auto-install `jq` with SHA-256 pin
+- [x] `--log-summary` for pretty session-log rendering via `glow`
+- [x] `gum` / `glow` TUI polish with graceful fallbacks
+- [x] Bounded installer stdin drain (avoids `curl: (56)` noise on piped install)
+
+### Phase 4 — Release hygiene & reach (Current focus)
 
 - [ ] GitHub Actions CI running bats on macOS runners
 - [ ] Tagged GitHub Releases with immutable pinned URLs + baked-in SHA-256
 - [ ] Uninstall command (`goodnight --uninstall`)
 - [ ] Sub-hour timeout units (`--timeout 30m`)
 
-### Phase 4 — Advanced features (Later)
+### Phase 5 — Advanced features (Later)
 
 - [ ] Caffeinate ownership filtering (only kill Claude-parented caffeinate)
 - [ ] Preflight format adaptation to future macOS versions

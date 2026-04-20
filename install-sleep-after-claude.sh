@@ -1,19 +1,36 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────
 #  install-sleep-after-claude.sh
-#  Self-extracting installer for sleep-after-claude + goodnight alias
+#  Self-extracting installer for sleep-after-claude + goodnight alias.
 #
 #  Usage:
 #    bash install-sleep-after-claude.sh
-#    or: chmod +x install-sleep-after-claude.sh && ./install-sleep-after-claude.sh
+#    curl -fsSL <url> | bash             # piped-install path (re-downloads
+#                                          self into temp file, validates
+#                                          size/markers/optional SHA, then
+#                                          extracts)
 #
-#  What it does:
-#    1. Verifies macOS
-#    2. Creates ~/bin if needed
-#    3. Backs up any existing sleep-after-claude install
-#    4. Extracts the embedded script to ~/bin/sleep-after-claude
-#    5. Detects your shell (zsh/bash) and adds the `goodnight` alias
-#    6. Verifies the install with a preflight scan
+#  What it does, in order:
+#    1. Verifies macOS.
+#    2. Creates ~/bin if needed; adds it to PATH in the user's shell rc.
+#    3. Backs up any existing sleep-after-claude install.
+#    4. Extracts the embedded script to ~/bin/sleep-after-claude.
+#    5. Detects the shell (zsh/bash) and installs a deduplicated
+#       `goodnight` alias; unknown shells get manual instructions only.
+#    6. Auto-installs jq into ~/bin/jq (SHA-pinned per arch, non-fatal
+#       on failure — goodnight falls back to --watch-pid mode without jq).
+#    7. Auto-installs Claude Code hooks into ~/.claude/settings.json so
+#       --smart idle detection works on first run. Gated by jq
+#       availability and SAC_SKIP_HOOK_INSTALL=1 (opt-out).
+#    8. Verifies the install by running `--help` on the extracted tool.
+#    9. Drains its own stdin on piped-install exit with a bounded 5s
+#       timeout (F-11) so `curl | bash && next_cmd` chains don't hang.
+#
+#  Environment variable overrides:
+#    SLEEP_AFTER_CLAUDE_INSTALLER_URL      — alt source URL
+#    SLEEP_AFTER_CLAUDE_INSTALLER_SHA256   — require this SHA on piped-install
+#    SAC_JQ_SHA256                         — override the expected jq SHA
+#    SAC_SKIP_HOOK_INSTALL=1               — skip ~/.claude/settings.json edit
 # ─────────────────────────────────────────────────────────────────
 
 set -uo pipefail

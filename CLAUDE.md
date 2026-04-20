@@ -1,19 +1,20 @@
 # CLAUDE.md
 
-<!-- Last updated: 2026-04-19 | Audit cycle: 2026-04-19 (audit → remediation → test expansion → docs) -->
+<!-- Last updated: 2026-04-20 | Audit cycle: 2026-04-20 (follow-on cycle — smart-mode / self-update / hooks) -->
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Repository layout
 
-macOS Bash utility `sleep-after-claude` (aliased to `goodnight`) that watches a Claude Code process and sleeps the Mac when it finishes. Distributed via a self-extracting installer over `curl | bash`.
+macOS Bash utility `sleep-after-claude` (aliased to `goodnight`) that watches a Claude Code session and sleeps the Mac when it finishes. Distributed via a self-extracting installer over `curl | bash`.
 
 - `sleep-after-claude` — the tool. Standalone Bash script.
-- `install-sleep-after-claude.sh` — self-extracting installer. Embeds a byte-identical copy of `sleep-after-claude` between `__SCRIPT_START__` / `__SCRIPT_END__` markers and extracts it to `~/bin` at install time.
+- `install-sleep-after-claude.sh` — self-extracting installer. Embeds a byte-identical copy of `sleep-after-claude` between `__SCRIPT_START__` / `__SCRIPT_END__` markers and extracts it to `~/bin` at install time. Also auto-installs `jq` (SHA-pinned) and Claude Code hooks unless opted out.
 - `scripts/check-parity.sh` — verifies the embedded payload matches the standalone script. See "Parity invariant" below.
-- `.githooks/pre-commit` — opt-in hook that runs the parity check when either script is staged. Enable with `git config core.hooksPath .githooks`.
-- `tests/` — bats-core regression suite covering every fix from the 2026-04-19 audit cycle. See "Testing" below.
-- `README.md` — user-facing install/usage blurb + documented escape hatches for CDN cache staleness and checksum pinning.
+- `.githooks/pre-commit` — opt-in legacy hook that runs the parity check when either script is staged. Enable with `git config core.hooksPath .githooks`. Superseded by the `pre-commit` framework config at `.pre-commit-config.yaml`.
+- `.pre-commit-config.yaml` — canonical pre-commit config. Runs parity + `shellcheck` + `shfmt` + repo hygiene on every commit.
+- `tests/` — bats-core regression suite. Each `*.bats` file's header comment names the audit finding(s) or subsystem it protects. Live counts: `bats tests/ --count` and `ls tests/*.bats | wc -l`.
+- `README.md` — user-facing install/usage guide + documented escape hatches for CDN staleness, SHA pinning, and hook opt-out.
 
 ## Parity invariant (critical)
 
@@ -27,19 +28,15 @@ bash scripts/check-parity.sh
 
 Exits 0 when identical, non-zero with a diff excerpt on drift.
 
-The preferred way to enforce this (and every other lint) is the
-`pre-commit` framework — install once per clone:
+The preferred way to enforce this (and every other lint) is the `pre-commit` framework — install once per clone:
 
 ```bash
 pre-commit install
 ```
 
-This wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit` and
-runs parity + shellcheck + shfmt + hygiene hooks on every commit. A
-standalone legacy hook at `.githooks/pre-commit` still exists for
-users who prefer `git config core.hooksPath .githooks`.
+This wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit` and runs parity + shellcheck + shfmt + hygiene hooks on every commit. The standalone legacy hook at `.githooks/pre-commit` still exists for users who prefer `git config core.hooksPath .githooks`.
 
-Regression test: `tests/parity.bats` (3 cases — passes on tree, fails on induced drift, fails on missing markers).
+Regression test: `tests/parity.bats` (passes on tree, fails on induced drift, fails on missing markers).
 
 ## Installer trust chain
 
@@ -54,7 +51,59 @@ The re-download path enforces:
 - **Marker presence** — payload must contain both `__SCRIPT_START__` and `__SCRIPT_END__` literal lines.
 - **Optional SHA-256 pin** — if `$SLEEP_AFTER_CLAUDE_INSTALLER_SHA256` is set, the downloaded body's `shasum -a 256` must match before extraction proceeds.
 
-Regression tests: `tests/installer-trust-chain.bats` (7 cases including size/marker rejection and SHA256 match + mismatch).
+On the piped-install exit path, the installer **drains the remainder of its own stdin** (the bytes of the embedded payload that are still streaming from curl) behind a bounded 5s timeout (F-11) so a pathological trickle can't hang the exit. See installer step "Drain the rest of the piped installer" for the detection (`[[ -p /dev/stdin ]]`) and the `gtimeout` / `timeout` / background-watchdog fallback chain.
+
+Regression tests: `tests/installer-trust-chain.bats`, `tests/installer-jq-rejection.bats`, `tests/installer-consent-and-exec.bats`, `tests/installer-deps.bats`.
+
+## `jq` auto-install + SHA-256 pin
+
+Default `goodnight` mode (`--smart`) requires `jq` to read/write `~/.claude/settings.json`. macOS ships without `jq`, so the installer auto-fetches a static binary from `github.com/jqlang/jq` releases and drops it at `~/bin/jq`. This is gated by:
+
+- **Architecture probe** — `arm64` or `amd64`; unknown → skip with warning.
+- **Pre-existing-binary probe (F-09)** — checks `~/bin/jq`, `/opt/homebrew/bin/jq`, `/usr/local/bin/jq`, `/usr/bin/jq` before reaching for the network. If found, adds its dir to `$PATH` for the remainder of the installer run.
+- **Size envelope** — 500KB–10MB.
+- **SHA-256 pin (F-02)** — per-arch expected hash hardcoded in `ensure_jq()`. Mismatch is a hard refusal (not a warning). Override via `SAC_JQ_SHA256=<hex>` when legitimately re-pinning.
+- **macOS quarantine strip** — `xattr -d com.apple.quarantine` so Gatekeeper doesn't flag the first invocation.
+
+Failure is non-fatal for the overall install: goodnight still works in legacy `--watch-pid` mode, and the user can run `brew install jq && goodnight --install-hooks` later.
+
+Bumping jq: update `jq_version` + both arch hashes in `ensure_jq()`. Rotate hashes with `curl -fsSL <release-url> | shasum -a 256`.
+
+Regression tests: `tests/installer-deps.bats` (happy + offline), `tests/installer-jq-rejection.bats` (F-02 — mismatched SHA refused, matching accepted).
+
+## Claude Code hook integration
+
+`--smart` mode sleeps the Mac when all Claude Code **sessions** are idle, not when the `claude` process exits. Process-exit watching (`--watch-pid`) doesn't work for the common case: a user leaves a Claude REPL open in a terminal tab, walks away, and the process lives until they quit the tab in the morning.
+
+Hooks work by writing two entries into `~/.claude/settings.json`:
+
+- `UserPromptSubmit` hook — `touch $BUSY_DIR/<session_id>` when the user sends a new message.
+- `Stop` hook — `rm -f $BUSY_DIR/<session_id>` when Claude finishes its response and returns control.
+
+`BUSY_DIR` defaults to `~/.local/state/goodnight/busy`. `smart_watch_loop` polls this directory every 2s and fires sleep when the count stays at 0 for `SMART_IDLE_SECONDS` (default 30s). Stale markers older than `SMART_STALE_MARKER_MINS` (default 1440 = 24h, override via `SAC_STALE_MARKER_MINUTES`) are reaped — threshold is intentionally loose so a legitimately long-running Claude task isn't reaped mid-work (F-08).
+
+Hook command strings are written carefully:
+
+- **Lazy `$HOME` expansion (F-03)** — when `BUSY_DIR` is the default, the command string embeds the literal `"$HOME/.local/state/goodnight/busy"` so it expands at hook-runtime in Claude's subshell, not at install-time in the installer's shell. Survives home-dir moves and differing-context invocations (cron, launchd, etc.).
+- **Path quoting (F-04)** — when `BUSY_DIR` is non-default, the absolute path is single-quoted with `'` escaping so `$` / whitespace / metacharacters in the path can't be interpreted by Claude's hook shell.
+- **`_managed_by: goodnight` tag** — applied to each hook entry so reinstalls / uninstalls target only goodnight's entries and preserve the user's other hooks.
+- **Backup before write** — existing `settings.json` is copied to `settings.json.bak.<timestamp>` before merging.
+
+Hook install opt-out: `SAC_SKIP_HOOK_INSTALL=1` (F-06) — installer announces clearly before touching `~/.claude/settings.json` and honors this env var for users who don't want automatic modification.
+
+Regression tests: `tests/hooks.bats`, `tests/hook-command-runtime.bats` (F-03 runtime test: spawns a fresh shell with an arbitrary `$HOME`, pipes a real `.session_id` blob on stdin, verifies the hook command string resolves correctly).
+
+## Smart-watch semantics
+
+`smart_watch_loop` fires sleep only when **all three** conditions hold:
+
+1. **Proof-of-life** — at least one busy marker has been observed since watch start OR one already exists at entry (F-01 cold-start guard — prevents premature-sleep when hooks aren't loaded in the running session yet).
+2. **Continuous idle** — busy count has been 0 for `SMART_IDLE_SECONDS` uninterrupted.
+3. ~~Live-process absence~~ — documented as belt-and-suspenders in the function header but not currently enforced in the loop body; `--smart` relies on hook-based signals only. If the user's Claude session pre-dates hook install (hooks not yet loaded), the loop warns via the spinner text ("Waiting for a Claude prompt…") and stays in cold mode indefinitely.
+
+Default-mode selection (lines ~1762–1781): if the user passes no explicit watch flag, `goodnight` picks `--smart` when `hooks_installed` returns true, otherwise `--watch-pid`. Early-exit modes (`--install-hooks`, `--uninstall-hooks`, `--preflight`, `--list`, `--log-summary`, `--sleep-now`) bypass the selection entirely.
+
+Regression tests: `tests/smart-watch-semantics.bats` (F-01 + F-08 contract), `tests/smart-watch-runtime.bats` (drives the loop with a scripted `BUSY_DIR`), `tests/default-mode.bats` (selection logic).
 
 ## Preflight fail-closed contract
 
@@ -68,45 +117,94 @@ Rendering contract (both JSON and human-readable):
 | Scan clear | "No sleep blockers detected" | `true` | `true` |
 | Scan found blockers | "N sleep blocker(s): ..." | `true` | `false` |
 
-Pre-watch gate: when `PREFLIGHT_SCAN_OK != true`, the tool requires TTY confirmation or `--force` — same behavior as when actual blockers are present.
+Pre-watch gate: when `PREFLIGHT_SCAN_OK != true`, the tool requires TTY confirmation or `--force` — same behavior as when actual blockers are present. Applies to the default flow, `--smart`, and `--sleep-now`.
 
-Regression tests: `tests/preflight-fail-closed.bats` (6 cases including shimmed pmset failure).
+Blocker classification (`classify_blocker` at line ~921) groups assertions into `blocker | system | display | user | release` buckets so the renderer can show actionable blockers prominently and system-daemon noise dimly. The interactive menu offered on detected blockers lets the user terminate user-space apps (e.g., Zoom), skip with warning, or abort.
+
+Regression tests: `tests/preflight-fail-closed.bats`, `tests/blocker-classification.bats`.
+
+## Power-state gate
+
+The actionable path (`default watch`, `--smart`, `--dry-run`, `--caffeinate-only`, `--sleep-now`, `--wait-for-start`) begins with `wait_for_ac_power`. When on battery, it renders a styled warning card (gum-powered or hand-drawn fallback) and polls `pmset -g batt` every 2s with a spinner until AC is detected.
+
+Skippable with `--allow-battery` or `--force`. Desktop Macs (no battery detectable) pass through as power source `"Unknown"`. Must be the **first** check on the actionable path — we don't want to burn battery downloading self-update checks or waiting for Claude when unplugged.
+
+Regression tests: `tests/power-gate.bats` (shimmed `pmset` across AC / Battery / Unknown states).
+
+## Self-update check
+
+`check_for_update` runs on the actionable path (after the power gate, before preflight). Compares `shasum -a 256` of the running script to the remote canonical script at `$SLEEP_AFTER_CLAUDE_UPDATE_URL` (default: main-branch raw URL). Rate-limited to once per `UPDATE_CACHE_TTL_SECS` (default 24h) via `~/.cache/sleep-after-claude/last-update-check`.
+
+**Fails open** (silent skip) on: `--skip-update-check`, missing `curl` / `shasum`, network error, unwritable cache dir, non-shebang remote content (CDN error page), or non-TTY stdin (don't prompt in automation). Force an immediate check with `--check-update` (busts the TTL cache).
+
+On mismatch + TTY confirmation:
+
+1. Run `curl … | bash` against `$UPDATE_INSTALLER_URL` with `SAC_SKIP_HOOK_INSTALL=1` (hooks already installed — skip the announcement).
+2. On success: `exec` into the freshly-installed binary using `SAC_ORIGINAL_ARGS` (captured at script entry) so the update seamlessly continues the user's current invocation (F-05). `SAC_SKIP_UPDATE_CHECK=1` is set in the child env so the new process doesn't re-prompt.
+3. If `exec` fails (unwritable target, etc.): warn and continue with the in-memory stale script.
+
+Regression tests: `tests/update-check.bats` (shimmed `curl` on `PATH` serving local files; isolated `$HOME`).
+
+## Concurrent-run lock (F-07)
+
+Two concurrent `goodnight` invocations racing on caffeinate release and `pmset sleepnow` was a real failure mode (second instance sleeps the Mac while first is still watching). macOS bash ships without `flock`; the fix is a **directory-as-lock** at `~/.local/state/goodnight/lock` using the atomicity of `mkdir`.
+
+- Acquired after preflight, before `WATCH_STARTED=true` — both in `--smart` and the default flow (guarded by `SMART_WATCH_DONE` so we don't double-acquire).
+- PID written to `$GOODNIGHT_LOCK_DIR/pid`. On collision: if `kill -0 $holder_pid` succeeds, error out; if the holder is dead, the lock is reclaimed (prevents permanent deadlock after crash).
+- Released on every exit path via the EXIT trap (`cleanup_fd_and_tmp` → `release_goodnight_lock`).
+
+Regression tests: `tests/concurrent-lock.bats`, `tests/concurrent-lock-runtime.bats` (spawns two real bash subprocesses racing on the lock; asserts exactly one wins).
 
 ## Testing
 
-Tests use bats-core and PATH-shim mocks (fake `pmset` binaries in per-test TMPDIRs). They run fully offline and are deterministic (verified by double-run).
+Tests use bats-core and PATH-shim mocks (fake `pmset` / `curl` / `jq` binaries in per-test TMPDIRs). They run fully offline and are deterministic. Shared helpers live at `tests/lib/common.bash` (`setup_sandbox`, `shim`, `shim_fixture`, `assert_contains`).
 
 ```bash
 bats tests/                   # full suite
 bats tests/parity.bats        # single file
+bats tests/ --count           # live test count
 bash -n sleep-after-claude install-sleep-after-claude.sh scripts/check-parity.sh
 bash scripts/check-parity.sh
 ```
 
-Check the live test count with `bats tests/ --count`.
-
 ### What's covered
 
-Every finding fixed in the 2026-04-19 audit cycle has a regression test that would fail if its fix were reverted. See `tests/*.bats` — each file's header comment names the findings it protects.
+Every finding fixed in either audit cycle has at least one regression test that would fail if its fix were reverted. Each `tests/*.bats` file's header comment names the finding(s) it protects.
 
 ### What's not covered
 
-- The actual watch loop (polling + `kill -0`) and the `pmset sleepnow` invocation — would require putting the test machine to sleep or a Mach-level sleep mock that doesn't exist.
-- The broad Claude-process-detection heuristic fallback (audit finding F-09, deferred).
-- Network behavior of real `curl` against GitHub — tests use `file://` URLs only.
+- The **real** `pmset sleepnow` call — would require actually sleeping the test machine or a Mach-level sleep mock that doesn't exist.
+- Network behavior of real `curl` against GitHub — tests use `file://` URLs and PATH-shimmed `curl` only.
+- The full installer end-to-end in piped mode — the TTY / stdin-pipe semantics are hard to simulate faithfully; individual pieces (size check, marker check, SHA pin, drain timeout, hook install, jq install) have isolated tests.
 
 ## Architecture of `sleep-after-claude`
 
 Linear top-to-bottom flow with labeled section banners (`# ── Section ──`). Navigate by banners rather than line numbers — line numbers drift with edits. Major sections, in source order:
 
-1. **macOS guard + TTY/Bash-version detection** — sets `USE_BUILTIN_SLEEP` (Bash ≥ 4 FIFO trick to avoid forking `sleep`), color toggles, and TTY flags that downstream output branches on.
-2. **Config defaults + arg parsing** — flag table lives inline in the `--help` block. Keep the `case` arms above and the `--help` text in sync when adding flags.
-3. **Claude process detection** (`find_claude_processes`) — two-tier: a "tight" pass using `pgrep -x claude` / `pgrep -f claude-code`, falling back to a broad `pgrep -fi claude` filtered by `EXCLUDE_PATTERN` to weed out Electron-based apps (Claude.app, Cursor, Windsurf, chrome-native-host, etc.). When adding a new false-positive, update `EXCLUDE_PATTERN`.
-4. **Pre-flight scan** (`scan_assertions`, `preflight_scan`, `render_preflight*`) — inventories `caffeinate` processes, `pmset -g assertions`, clamshell/lid state, battery, user sessions, then emits a verdict. Gated by `--no-preflight`, restricted by `--brief`, machine-readable via `--json`. See "Preflight fail-closed contract" above.
-5. **FIFO setup + cleanup trap** — opens fd 9 on a named pipe so the watch loop can `read -t` instead of forking `/bin/sleep` every tick.
-6. **Early-exit modes** (`--list`, `--preflight`, then `--dry-run` / `--caffeinate-only`) run before the actual sleep.
-7. **Watch loop** — polls the target PID until it exits or `--timeout` fires. PID-reuse detection compares the **binary path only** (first token of `ps -p ... -o command=`), not the full argv — argv mutation via `setproctitle` / `exec -a` must not trigger a false "reused" signal.
-8. **Release caffeinate + `pmset sleepnow`** — the actual sleep action.
+1. **macOS guard + TTY/Bash-version detection** — sets `USE_BUILTIN_SLEEP` (Bash ≥ 4 FIFO trick to avoid forking `sleep`), color toggles, and TTY flags that downstream output branches on. Captures `SAC_ORIGINAL_ARGS` up-front for the self-update re-exec path (F-05).
+2. **Colours + config defaults** — flag-state booleans, paths, TTL values.
+3. **Helpers** — `print_*` helpers, `elapsed_label`, `play_sound`, `as_escape` / `json_escape`, `notify_macos`, `log_event` (warn-once on write failure), `micro_sleep` (FIFO builtin fast-path).
+4. **gum / glow integration** — optional polish layer. `have_gum` / `have_glow` detection gates TUI rendering (panels, confirms, menus, spinners). Over SSH: gum defaults off because mobile SSH clients (Termius/Blink) mishandle `/dev/tty` and arrow keys. `SAC_NO_GUM=1` forces fallback; `SAC_FORCE_GUM=1` re-enables over SSH; `SAC_NO_GLOW=1` disables markdown rendering.
+5. **Claude process detection** (`find_claude_processes`) — two-tier: a "tight" pass using `pgrep -x claude` / `pgrep -f claude-code`, falling back to a broad `pgrep -fi claude` filtered by `EXCLUDE_PATTERN` to weed out Electron apps (Claude.app, Cursor, Windsurf, chrome-native-host, `anthropic-tools`, etc.). When adding a new false-positive, update `EXCLUDE_PATTERN`.
+6. **Pre-flight scan** (`scan_assertions`, `preflight_scan`, `render_preflight*`) — inventories caffeinate processes, `pmset -g assertions`, clamshell/lid state, battery, user sessions, then emits a verdict. Gated by `--no-preflight`, restricted by `--brief`, machine-readable via `--json`. See "Preflight fail-closed contract" above.
+7. **Blocker classification** (`classify_blocker`, `prompt_and_handle_blockers`, `print_post_watch_blockers`) — groups assertions into severity buckets and drives the interactive terminate/skip/abort menu when blockers are present.
+8. **Auto-start caffeinate -dim** (`ensure_caffeinate_running`) — launches a detached `caffeinate -dim` when none is already owned by `$USER`, so the Mac doesn't drift to sleep while we watch. Skippable with `--no-auto-caffeinate`.
+9. **Power-state gate** (`get_power_source`, `get_battery_percent`, `render_battery_gauge`, `wait_for_ac_power`) — blocks until AC is connected when on battery. See "Power-state gate" above.
+10. **Self-update check** (`check_for_update`) — see "Self-update check" above.
+11. **Claude Code hook integration** (`hooks_installed`, `install_claude_hooks`, `uninstall_claude_hooks`, `count_busy_sessions`, `smart_watch_loop`) — see "Claude Code hook integration" and "Smart-watch semantics" above.
+12. **Argument parsing** — flag table lives inline in the `--help` block. Keep the `case` arms, the default-mode-selection block, and the `--help` text in sync when adding flags.
+13. **Default mode selection** — picks `--smart` (hooks installed) or `--watch-pid` (not installed) when neither was passed explicitly. See "Smart-watch semantics" above.
+14. **FIFO setup + cleanup traps** — opens fd 9 on a named pipe so the watch loop can `read -t` instead of forking `/bin/sleep` every tick. EXIT trap releases the fd, removes the FIFO dir, and releases the concurrent-run lock (F-07). `on_interrupt` (INT/TERM/HUP) no longer calls `cleanup_fd_and_tmp` directly (F-12) — relies on the EXIT trap.
+15. **Concurrent-run lock** (`acquire_goodnight_lock`, `release_goodnight_lock`) — see "Concurrent-run lock (F-07)" above.
+16. **`--install-hooks` / `--uninstall-hooks` fast paths** — pure config-file operations; no preflight, no watch.
+17. **`--list` / `--preflight` / `--log-summary` modes** — early exits for introspection-only flows. `--log-summary` renders recent events + per-category counts as markdown via `glow` when available, plain text otherwise.
+18. **Actionable-path preamble** — `print_header` → `wait_for_ac_power` → `check_for_update`. Every path that might actually sleep the Mac goes through these in this order.
+19. **`--sleep-now` fast path** — skips Claude detection and the watch loop entirely. Runs preflight + blocker handling, releases existing caffeinate, then sleeps.
+20. **`--smart` mode** — hook-based watch. Requires `hooks_installed`; refuses and points at `--install-hooks` / `--watch-pid` otherwise. Runs preflight + blocker handling, acquires the lock, runs `smart_watch_loop`, then falls through to the release-caffeinate + sleep sequence by setting `SMART_WATCH_DONE=true`.
+21. **Detect Claude PID** — default watch mode when `TARGET_PID` isn't set by `--pid` or smart-mode. Honors `--wait-for-start`. On multi-match, watches the first and prints the rest with a hint to use `--pid`.
+22. **Pre-flight scan + verdict + optional confirmation** — runs on the default / `--watch-pid` path.
+23. **Watch loop** — polls the target PID until it exits or `--timeout` fires. PID-reuse detection (every 300 ticks / 30s) compares the **binary path only** (first whitespace token of `ps -p … -o command=`), not the full argv — argv mutation via `setproctitle` / `exec -a` must not trigger a false "reused" signal (F-10).
+24. **Release caffeinate + `pmset sleepnow`** — kill captured caffeinate PIDs (SIGTERM → SIGKILL fallback), respect `--dry-run` / `--caffeinate-only`, then `pmset sleepnow` with an `osascript … sleep` fallback.
 
 When modifying behavior, identify which section owns the concern; most flags touch exactly one section.
 
@@ -114,9 +212,11 @@ When modifying behavior, identify which section owns the concern; most flags tou
 
 - Bash, `set -uo pipefail` (intentionally no `-e` — the script relies on non-zero exits from `pgrep` being non-fatal).
 - All user-facing output goes through `print_header` / `print_step` / `print_ok` / `print_warn` / `print_error` / `print_done`. Don't emit raw `echo` for status lines — these helpers handle TTY/non-TTY color stripping.
+- Styled UI (confirms, menus, panels, spinners) goes through `ui_confirm` / `ui_choose` / `ui_panel` / `ui_spin` so gum / hand-drawn fallback selection happens in one place.
 - Integer validation uses `is_integer` / `is_positive_integer`; reuse rather than inlining regex.
+- `printf` format strings used with dynamic data must be **static** (every dynamic value passes through `%s`) — stray `%` in battery percents, cmd names, etc. would otherwise corrupt the format. Search "Static format" in the source for the safety pattern.
 - `--json` output is consumed by automation; any new preflight field must be added to the JSON emitter **and** the human-readable renderer **and** the JSON-shape assertions in `tests/preflight-fail-closed.bats`.
-- `log_event` writes to `$LOG_FILE` only when `--log` is set. It warns to stderr **once per session** on first write failure (brace-grouped `{ echo ...; } 2>/dev/null` so bash's own redirection error is also suppressed). Subsequent failures stay silent to avoid spamming the watch loop.
+- `log_event` writes to `$LOG_FILE` only when `--log` is set. It warns to stderr **once per session** on first write failure (brace-grouped `{ echo ...; } 2>/dev/null` so bash's own redirection error is also suppressed). Subsequent failures stay silent to avoid spamming the watch loop. Event names are stable — `--log-summary` groups on them.
 
 ### Formatting / linting
 
@@ -136,23 +236,42 @@ For editor experience, `bash-language-server` gives real-time shellcheck diagnos
 
 - Shell rc detection: `zsh` → `~/.zshrc`; `bash` → `~/.bash_profile` if exists else `~/.bashrc`. Unknown shells (fish, nushell, etc.) **skip alias install** and print manual instructions — do not fall through to `~/.zshrc`.
 - The `goodnight` alias line is written with `$HOME` **expanded at install time** to an absolute path. Reinstalls strip any prior `alias goodnight=` line (and its `# sleep-after-claude shortcut` header comment if directly above) before re-appending — this makes reinstalls at a new path idempotent.
+- A `PATH` line (`export PATH="$HOME/bin:$PATH"`) is appended to the same rc file on fresh installs, dedupe-checked so manually-edited `PATH` exports aren't duplicated.
+- `jq` auto-install is best-effort — failure is non-fatal; installer continues and falls back to `--watch-pid` mode.
+- Claude Code hook install is best-effort — gated by `SAC_SKIP_HOOK_INSTALL=1` (F-06) and by `jq` availability. When the installer modifies `~/.claude/settings.json` it announces the change explicitly first.
 - Verification failure (`$TARGET --help` returning non-zero) is a hard error — installer exits 1, not warn-and-continue.
+- On piped install (`curl | bash`), the installer drains its remaining stdin before exit with a bounded 5s timeout (F-11) to avoid `curl: (56)` cosmetic errors.
 
 ## Audit cycle history
 
-### 2026-04-19
+### 2026-04-20 (follow-on cycle)
 
-Full audit → remediation → test expansion → docs sync cycle.
+Second audit → remediation → test expansion → docs sync cycle, scoped to the features added between 2026-04-19 and 2026-04-20 (`--smart` mode, `--sleep-now`, self-update, hook integration, jq auto-install, power gate, `gum`/`glow` polish).
+
+- **Remediation (12 findings across 6 commits):**
+  - **F-01** (`8b9ed7a`) — `smart_watch_loop` cold-start: require proof-of-life (busy marker) before arming the idle countdown.
+  - **F-02** (`ad64164`) — SHA-256 verification for auto-downloaded `jq` binary; per-arch expected hashes, override via `SAC_JQ_SHA256`.
+  - **F-03** (`79d8e4f`) — lazy-expand `$HOME` in Claude hook commands so they survive home-dir moves and differ-context invocations.
+  - **F-04** (`79d8e4f`) — harden path quoting in hook commands against `$` / whitespace / metachars in custom `BUSY_DIR` values.
+  - **F-05** (`6e9871f`) — self-update re-exec: `exec` into the freshly-installed script preserving `SAC_ORIGINAL_ARGS`; set `SAC_SKIP_UPDATE_CHECK=1` in child env.
+  - **F-06** (`6e9871f`) — hook-install opt-out (`SAC_SKIP_HOOK_INSTALL=1`); explicit announcement before touching `~/.claude/settings.json`.
+  - **F-07** (`b63e632`) — mutual-exclusion lock (`~/.local/state/goodnight/lock` via atomic `mkdir`) to prevent concurrent watches racing on caffeinate + pmset.
+  - **F-08** (`8b9ed7a`) — stale-marker reaper threshold loosened to 24h so long-running Claude tasks aren't reaped mid-work; override via `SAC_STALE_MARKER_MINUTES`.
+  - **F-09** (`ad64164`) — probe common `jq` paths (`~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`) before reaching for the network.
+  - **F-11** (`b3b8981`) — bound installer stdin drain with `gtimeout` / `timeout` / background-watchdog fallback.
+  - **F-12** (`b3b8981`) — removed double-cleanup: `on_interrupt` no longer calls `cleanup_fd_and_tmp` directly; EXIT trap owns cleanup.
+- **Test expansion (`df6138d` + the fix commits):** runtime tests added for F-01, F-02, F-03, F-04, F-07 plus unit/semantic coverage across all remediated areas. Totals are retrievable via `bats tests/ --count`.
+- **Docs (this commit):** CLAUDE.md + README.md rewritten to reflect the post-remediation state, including new subsystems (hooks, self-update, power gate, concurrent lock) and the updated architecture section.
+
+### 2026-04-19 (initial audit)
+
+First audit → remediation → test expansion → docs sync cycle covering the original installer + preflight surface.
 
 - **Audit:** 17 findings (1 Critical, 7 High, 9 Notable).
-- **Remediation:** 9 findings fixed across 4 commits (F-02, F-03, F-04, F-05, F-06, F-07, F-08, F-10, F-11). 7 Notable deferred (F-09, F-12, F-13, F-14, F-15, F-16, F-17) — see per-finding rationale in commit messages.
-- **Test expansion:** 31 bats tests added, deterministic, fully offline.
-- **Docs:** this file rewritten to match post-remediation state.
+- **Remediation:** 9 findings fixed across 4 commits (F-02, F-03, F-04, F-05, F-06, F-07, F-08, F-10, F-11 of the **initial** numbering). Commits: `d055d0c`, `d410216`, `9a98861`, `6926159`. Notable deferred items were either re-scoped into the 2026-04-20 cycle under new IDs or remain open.
+- **Decisions captured in this file:**
+  - Parity enforcement via `scripts/check-parity.sh` + `.pre-commit-config.yaml` rather than auto-generating the installer from the standalone (dual-file architecture preserved; single-source-of-truth deferred).
+  - Installer trust chain adopted size + marker + optional SHA-256 gating rather than pinning to a commit SHA by default (users can pin via env var; default stays on `main` for frictionless `curl | bash`).
+  - Preflight fails closed (not open) on unknown pmset state — a silent "clear" verdict is the worst possible failure for this tool.
 
-Commits: `git log --oneline` from `737fd43..main`.
-
-Notable decisions captured inline in this file:
-
-- Parity enforcement via `scripts/check-parity.sh` + optional `.githooks/pre-commit` rather than auto-generating the installer from the standalone (dual-file architecture preserved; single-source-of-truth deferred to next cycle).
-- Installer trust chain adopted size + marker + optional SHA-256 gating rather than pinning to a commit SHA by default (users can pin via env var; default stays on `main` for frictionless `curl | bash`).
-- Preflight fails closed (not open) on unknown pmset state — a silent "clear" verdict is the worst possible failure for this tool.
+> **Note on finding-ID overlap.** The 2026-04-19 and 2026-04-20 cycles both number their findings `F-01…F-NN` independently — the IDs are scoped to the cycle they appear in, not globally unique. A commit message referencing `F-07` means "F-07 of the cycle this commit belongs to." When in doubt, check the commit date.
