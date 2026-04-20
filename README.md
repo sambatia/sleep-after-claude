@@ -809,9 +809,7 @@ Open an issue labeled `enhancement` describing:
 
 ## 📄 Section 18: License
 
-No license file is currently present in this repository. In the absence of an explicit license, this project is "All rights reserved" by default — meaning you can read the source, but you don't have explicit legal permission to redistribute, modify, or reuse it.
-
-> **To be documented:** A permissive open-source license (MIT or Apache-2.0 recommended) should be added so the community has clear rights. If you're the maintainer reading this, please add a `LICENSE` file.
+This project is released under the **MIT License** — see [`LICENSE`](./LICENSE) for the full text. You're free to use, modify, redistribute, and build on goodnight in both personal and commercial contexts, subject to preserving the copyright notice.
 
 ---
 
