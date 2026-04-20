@@ -1,0 +1,62 @@
+# ─── Local agent / editor state ──────────────────────────────
+# Claude Code per-user settings and session state
+.claude/
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── macOS ──────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+
+# ─── Linux / Windows junk ───────────────────────────────────
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Secrets / environment ──────────────────────────────────
+# Never commit real env files; only .env.example templates belong in git.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+secrets.yml
+
+# ─── Bash / shell artifacts ─────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ─── Test / build artifacts ─────────────────────────────────
+# bats-core leaves no persistent artifacts, but temp dirs may leak
+# if a test crashes mid-run.
+/tmp/
+/tmp.*/
+/.cache/
+coverage/
+.coverage
+.nyc_output/
+node_modules/
+
+# ─── Pre-commit framework ───────────────────────────────────
+# The framework caches its hook environments; do not commit them.
+.pre-commit-cache/
