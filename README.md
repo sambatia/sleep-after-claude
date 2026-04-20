@@ -139,16 +139,16 @@ flowchart LR
 
 **Step-by-step walkthrough (default flow):**
 
-1️⃣ You type `goodnight` in your terminal.
-2️⃣ If you're on battery, goodnight shows a "please plug in" card and waits for the charger. Skip with `--allow-battery`.
-3️⃣ Once per 24 hours, goodnight does a quick SHA-256 comparison against the remote script and offers to update. Skip with `--skip-update-check`.
-4️⃣ If Claude Code hooks are installed, goodnight runs in **smart mode** — watching the busy-marker directory populated by those hooks. Otherwise it falls back to watching a specific `claude` PID.
-5️⃣ It runs a **preflight audit** — checking whether anything else on your Mac would block sleep (backup jobs, screen-sharing, USB devices, etc.).
-6️⃣ If everything looks clear, goodnight acquires a mutual-exclusion lock (so two concurrent `goodnight` invocations can't race) and starts watching.
-7️⃣ When all Claude sessions go idle (smart mode) or the watched process exits (watch-pid mode), goodnight releases any `caffeinate` helpers.
-8️⃣ It issues `pmset sleepnow` to initiate sleep.
-9️⃣ Your Mac transitions into sleep mode within one second.
-🔟 The full sequence of events is written to `~/.local/state/sleep-after-claude.log` (if you enabled `--log`). Render it later with `goodnight --log-summary`.
+1. **Start goodnight.** You type `goodnight` in your terminal.
+2. **Pass the power check.** If you're on battery, goodnight shows a "please plug in" card and waits for the charger. Use `--allow-battery` to skip this gate.
+3. **Check for updates.** Once per 24 hours, goodnight compares the local script hash with the remote script and offers to update if they differ. Use `--skip-update-check` to skip this step.
+4. **Choose the watch mode.** If Claude Code hooks are installed, goodnight uses smart mode and watches the busy-marker directory populated by those hooks. Otherwise, it watches a specific `claude` PID.
+5. **Run preflight.** Goodnight checks whether anything else on your Mac would block sleep, such as backup jobs, screen sharing, or USB devices.
+6. **Acquire the lock.** If everything is clear, goodnight acquires a mutual-exclusion lock so two concurrent `goodnight` invocations cannot race.
+7. **Wait for Claude to finish.** Goodnight watches until all Claude sessions go idle in smart mode, or until the watched process exits in watch-pid mode.
+8. **Release keep-awake helpers.** Goodnight releases any `caffeinate` helpers it started.
+9. **Start sleep.** Goodnight issues `pmset sleepnow`.
+10. **Write the log.** If `--log` is enabled, the full sequence is written to `~/.local/state/sleep-after-claude.log`. Render it later with `goodnight --log-summary`.
 
 ---
 
