@@ -91,3 +91,28 @@ setup() {
   run grep -E 'REFUSING' "$REPO_ROOT/install-sleep-after-claude.sh"
   [ "$status" -eq 0 ]
 }
+
+@test "installer: terminal UI layer provides gum/glow fallbacks" {
+  run grep -E '^have_gum\(\)' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -E '^ui_spin\(\)' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -E '^ui_panel\(\)' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -E '^ui_markdown\(\)' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "installer: long-running steps go through ui_spin" {
+  run grep -E 'ui_spin "Fetching installer payload' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -E 'ui_spin "Extracting sleep-after-claude' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -E 'ui_spin "Running quick verification' "$REPO_ROOT/install-sleep-after-claude.sh"
+  [ "$status" -eq 0 ]
+}

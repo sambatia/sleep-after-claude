@@ -1,0 +1,27 @@
+
+GUM_STYLE|--foreground|39|--bold|--|sleep-after-claude
+GUM_STYLE_TEXT|sleep-after-claude
+GUM_STYLE|--foreground|245|--|Sleep your Mac when Claude Code finishes.
+GUM_STYLE_TEXT|Sleep your Mac when Claude Code finishes.
+GUM_STYLE|--foreground|240|--|────────────────────────────────────────────
+GUM_STYLE_TEXT|────────────────────────────────────────────
+
+GUM_STYLE|--foreground|141|--bold|--|Sleep assertions
+GUM_STYLE_TEXT|Sleep assertions
+GUM_STYLE|--foreground|245|--|Detected with pmset -g assertions.
+GUM_STYLE_TEXT|Detected with pmset -g assertions.
+GUM_STYLE|--foreground|240|--|────────────────────────────────────────────
+GUM_STYLE_TEXT|────────────────────────────────────────────
+GUM_TABLE|--print|--separator|,|--columns|State,PID,Process,Assertion|--border|rounded|--border.foreground|240|--header.foreground|141|--cell.foreground|252
+GUM_TABLE_ROW|will release,123,caffeinate,PreventUserIdleSystemSleep
+GUM_TABLE_ROW|BLOCKS SLEEP,456,zoom,PreventUserIdleSystemSleep
+GUM_STYLE|--border|rounded|--border-foreground|196|--padding|1 2|--margin|1 0|--|GUM_STYLE|--foreground|196|--bold|--|1 active system-sleep blocker
+GUM_STYLE_TEXT|1 active system-sleep blocker||GUM_STYLE
+GUM_STYLE_STDIN|Zoom is preventing system sleep.
+GUM_STYLE_TEXT|GUM_STYLE|--foreground|196|--bold|--|1 active system-sleep blocker\nGUM_STYLE_TEXT|1 active system-sleep blocker
+GUM_STYLE_TEXT|
+GUM_STYLE_TEXT|GUM_STYLE\nGUM_STYLE_STDIN|Zoom is preventing system sleep.
+GLOW|-
+GLOW_LINE|# Help
+GLOW_LINE|
+GLOW_LINE|Use goodnight.

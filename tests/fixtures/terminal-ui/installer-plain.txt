@@ -1,0 +1,14 @@
+
+  sleep-after-claude installer
+  Installs goodnight, jq support, and Claude Code idle hooks.
+  ─────────────────────────────────────────
+
+
+  Claude Code hooks skipped
+  ─────────────────────────────────────────
+  Run goodnight --install-hooks later.
+  Existing hooks are preserved.
+
+# Installation complete 🌙
+
+goodnight is installed at `~/bin/sleep-after-claude`.
