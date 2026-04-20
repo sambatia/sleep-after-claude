@@ -382,12 +382,9 @@ fi
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 hooks_already_installed() {
   [[ -f "$CLAUDE_SETTINGS" ]] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
-      "$CLAUDE_SETTINGS" >/dev/null 2>&1
-  else
-    grep -q '"_managed_by"[[:space:]]*:[[:space:]]*"goodnight"' "$CLAUDE_SETTINGS" 2>/dev/null
-  fi
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
+    "$CLAUDE_SETTINGS" >/dev/null 2>&1
 }
 
 echo ""
@@ -1821,16 +1818,13 @@ check_for_update() {
 }
 
 # Return 0 if goodnight's hook entries are present in the Claude Code
-# settings file. Uses jq when available, falls back to a grep of the
-# "_managed_by:goodnight" tag.
+# settings file. Smart mode requires jq at hook runtime, so absence of jq
+# means hooks are not operational even if marker text exists in the file.
 hooks_installed() {
   [[ -f "$CLAUDE_SETTINGS_FILE" ]] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
-      "$CLAUDE_SETTINGS_FILE" >/dev/null 2>&1
-  else
-    grep -q '"_managed_by"[[:space:]]*:[[:space:]]*"goodnight"' "$CLAUDE_SETTINGS_FILE" 2>/dev/null
-  fi
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '(.hooks.Stop // []) + (.hooks.UserPromptSubmit // []) | map(select(._managed_by == "goodnight")) | length > 0' \
+    "$CLAUDE_SETTINGS_FILE" >/dev/null 2>&1
 }
 
 # ── Claude Code hook integration ──────────────────────────────
@@ -1894,7 +1888,7 @@ install_claude_hooks() {
   # so reinstalls don't duplicate. Then append the fresh entries.
   local tmp
   tmp="$(mktemp)"
-  jq --arg prompt_cmd "$prompt_cmd" --arg stop_cmd "$stop_cmd" '
+  if ! jq --arg prompt_cmd "$prompt_cmd" --arg stop_cmd "$stop_cmd" '
     # Ensure .hooks exists
     .hooks = (.hooks // {})
     # Strip any prior goodnight-managed entries
@@ -1911,7 +1905,16 @@ install_claude_hooks() {
         _managed_by: "goodnight",
         hooks: [{ type: "command", command: $stop_cmd }]
       }]
-  ' "$CLAUDE_SETTINGS_FILE" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS_FILE"
+  ' "$CLAUDE_SETTINGS_FILE" >"$tmp"; then
+    rm -f "$tmp"
+    print_error "Could not install goodnight hooks: $CLAUDE_SETTINGS_FILE is not valid JSON."
+    return 1
+  fi
+  if ! mv "$tmp" "$CLAUDE_SETTINGS_FILE"; then
+    rm -f "$tmp"
+    print_error "Could not install goodnight hooks: failed to update $CLAUDE_SETTINGS_FILE."
+    return 1
+  fi
 
   print_ok "Installed goodnight hooks into ${BOLD}$CLAUDE_SETTINGS_FILE${RESET}"
   print_step "Busy markers will appear at ${BOLD}$BUSY_DIR${RESET}"
@@ -1931,7 +1934,7 @@ uninstall_claude_hooks() {
   fi
   local tmp
   tmp="$(mktemp)"
-  jq '
+  if ! jq '
     .hooks = (.hooks // {})
     | .hooks.UserPromptSubmit = [ (.hooks.UserPromptSubmit // [])[] | select(._managed_by != "goodnight") ]
     | .hooks.Stop            = [ (.hooks.Stop            // [])[] | select(._managed_by != "goodnight") ]
@@ -1939,7 +1942,16 @@ uninstall_claude_hooks() {
     | if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end
     | if (.hooks.Stop            | length) == 0 then del(.hooks.Stop)            else . end
     | if (.hooks | length) == 0 then del(.hooks) else . end
-  ' "$CLAUDE_SETTINGS_FILE" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS_FILE"
+  ' "$CLAUDE_SETTINGS_FILE" >"$tmp"; then
+    rm -f "$tmp"
+    print_error "Could not remove goodnight hooks: $CLAUDE_SETTINGS_FILE is not valid JSON."
+    return 1
+  fi
+  if ! mv "$tmp" "$CLAUDE_SETTINGS_FILE"; then
+    rm -f "$tmp"
+    print_error "Could not remove goodnight hooks: failed to update $CLAUDE_SETTINGS_FILE."
+    return 1
+  fi
   print_ok "Removed goodnight hooks from ${BOLD}$CLAUDE_SETTINGS_FILE${RESET}"
 }
 
