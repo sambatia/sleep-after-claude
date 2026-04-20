@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Keep GitHub Actions versions fresh. The pre-commit config also
+  # pins third-party hook repos — those are NOT covered by Dependabot's
+  # pre-commit ecosystem (which only updates pre-commit itself), so
+  # bump `.pre-commit-config.yaml` manually when desired.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - "dependencies"
+      - "github-actions"
