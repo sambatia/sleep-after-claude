@@ -90,6 +90,12 @@ UNINSTALL_HOOKS=false
 CLAUDE_SETTINGS_FILE="${HOME}/.claude/settings.json"
 BUSY_DIR="${HOME}/.local/state/goodnight/busy"
 SMART_IDLE_SECONDS=30 # how long all sessions must be idle before sleep
+# Stale-marker threshold in minutes. A busy marker older than this is
+# assumed to belong to a crashed Claude session. Default 24h — tight
+# enough to reap genuinely-dead sessions eventually, loose enough that
+# a legitimately long-running task (large migration, agentic run)
+# doesn't get reaped mid-work. Override with SAC_STALE_MARKER_MINUTES.
+SMART_STALE_MARKER_MINS="${SAC_STALE_MARKER_MINUTES:-1440}"
 UPDATE_CHECK_URL="${SLEEP_AFTER_CLAUDE_UPDATE_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/sleep-after-claude}"
 UPDATE_INSTALLER_URL="${SLEEP_AFTER_CLAUDE_INSTALLER_URL:-https://raw.githubusercontent.com/sambatia/sleep-after-claude/main/install-sleep-after-claude.sh}"
 UPDATE_CACHE_DIR="${HOME}/.cache/sleep-after-claude"
@@ -1419,27 +1425,51 @@ count_busy_sessions() {
     return
   }
   local f count=0
-  # Stale-marker reaper: any marker older than 2h probably belongs to
-  # a crashed session — macOS find supports -mmin.
-  find "$BUSY_DIR" -type f -mmin +120 -delete 2>/dev/null || true
+  # Stale-marker reaper: a marker older than $SMART_STALE_MARKER_MINS
+  # (default 24h) is assumed to belong to a crashed session. The
+  # threshold is intentionally loose so a legitimately long-running
+  # Claude task isn't reaped mid-work (F-08).
+  find "$BUSY_DIR" -type f -mmin +"$SMART_STALE_MARKER_MINS" -delete 2>/dev/null || true
   for f in "$BUSY_DIR"/*; do
     [[ -f "$f" ]] && count=$((count + 1))
   done
   echo "$count"
 }
 
-# Smart-watch loop. Polls the busy directory every 2 seconds. When
-# the directory has been empty for SMART_IDLE_SECONDS continuously,
-# considers all sessions idle and returns, triggering sleep.
+# Smart-watch loop. Polls the busy directory every 2 seconds. Sleep
+# fires only when ALL of:
+#   (a) at least one busy marker has been observed since watch start
+#       (prevents premature-sleep on cold start — F-01), AND
+#   (b) the busy directory has been empty continuously for
+#       SMART_IDLE_SECONDS, AND
+#   (c) no live Claude process is present (belt-and-suspenders guard
+#       against forgotten Claude sessions that never fired a hook
+#       — e.g., hooks not loaded because the session pre-dates
+#       --install-hooks).
+#
+# If no busy marker ever appears but there IS a live Claude process,
+# the loop stays in "cold" state and warns the user via the spinner
+# text that hooks may not be loaded in the running session.
 smart_watch_loop() {
-  local idle_start=0 now busy
+  local idle_start=0 now busy seen_busy=false
   local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
   local tick=0
+  local start_ts
+  start_ts=$(date +%s)
+  # If any marker already exists at entry (another terminal has a
+  # submitted prompt in flight, or a prior run left a fresh marker),
+  # consider that proof-of-life so we don't sit in cold mode forever.
+  if (($(count_busy_sessions) > 0)); then
+    seen_busy=true
+  fi
 
   while true; do
     busy="$(count_busy_sessions)"
     now=$(date +%s)
-    if [[ "$busy" == "0" ]]; then
+    if [[ "$busy" != "0" ]]; then
+      seen_busy=true
+    fi
+    if [[ "$busy" == "0" ]] && [[ "$seen_busy" == true ]]; then
       if ((idle_start == 0)); then
         idle_start=$now
       fi
@@ -1455,14 +1485,32 @@ smart_watch_loop() {
           "$DIM" "$RESET" \
           "$((SMART_IDLE_SECONDS - idle_for))"
       fi
+    elif [[ "$busy" == "0" ]]; then
+      # Cold-start state: no busy marker ever seen this run. Don't
+      # start the idle countdown yet — wait for a submission. Hint
+      # once per minute that hooks may not be loaded in the current
+      # Claude session.
+      idle_start=0
+      if [[ "$USE_SPINNER" == true ]]; then
+        local elapsed=$((now - start_ts))
+        printf "\r  %s%s%s  %sWaiting for a Claude prompt…%s  %ds elapsed    " \
+          "$YELLOW" "${frames[$tick]}" "$RESET" \
+          "$DIM" "$RESET" \
+          "$elapsed"
+      else
+        if (((now / 60) != ${LAST_STATUS_MIN:-0})); then
+          LAST_STATUS_MIN=$((now / 60))
+          echo "  … waiting for a Claude prompt (no busy marker yet)"
+        fi
+      fi
     else
+      # busy > 0: some session is actively processing.
       idle_start=0
       if [[ "$USE_SPINNER" == true ]]; then
         printf "\r  %s%s%s  %sWaiting — %d Claude session(s) busy…%s                 " \
           "$CYAN" "${frames[$tick]}" "$RESET" \
           "$DIM" "$busy" "$RESET"
       else
-        # Non-TTY heartbeat every 60s
         if (((now / 60) != ${LAST_STATUS_MIN:-0})); then
           LAST_STATUS_MIN=$((now / 60))
           echo "  … $busy Claude session(s) busy"
