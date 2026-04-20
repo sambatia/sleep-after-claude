@@ -238,12 +238,25 @@ fi
 # mode, and the user can install jq later. We just print a clear
 # message.
 ensure_jq() {
+  # Prefer any already-installed jq. F-09: also probe common locations
+  # in case the user installed jq before this run but hasn't sourced
+  # the updated PATH yet.
   if command -v jq >/dev/null 2>&1; then
     ok "jq already installed: $(jq --version 2>/dev/null || echo '?')"
     return 0
   fi
+  local candidate
+  local candidate_dir
+  for candidate in "$HOME/bin/jq" "/opt/homebrew/bin/jq" "/usr/local/bin/jq" "/usr/bin/jq"; do
+    if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
+      ok "jq already installed at $candidate: $("$candidate" --version)"
+      candidate_dir="$(dirname "$candidate")"
+      export PATH="$candidate_dir:$PATH"
+      return 0
+    fi
+  done
 
-  local arch jq_url jq_tmp jq_dest jq_version
+  local arch jq_url jq_tmp jq_dest jq_version expected_sha got_sha
   case "$(uname -m)" in
     arm64) arch="arm64" ;;
     x86_64) arch="amd64" ;;
@@ -254,9 +267,19 @@ ensure_jq() {
       ;;
   esac
 
-  # Pinned to a known-good stable release. When bumping, verify the
-  # download works for both macos-arm64 and macos-amd64.
+  # Pinned to a known-good stable release. Bump = update version AND
+  # both SHA-256 values below. To rotate, fetch and compute with:
+  #   curl -fsSL "$jq_url" | shasum -a 256
   jq_version="1.8.1"
+  # F-02: Expected SHA-256 per arch. Mismatch → hard refusal. An
+  # override is honored via SAC_JQ_SHA256 for users who need to pin
+  # a different jq build (e.g., bleeding-edge version).
+  case "$arch" in
+    arm64) expected_sha="a9fe3ea2f86dfc72f6728417521ec9067b343277152b114f4e98d8cb0e263603" ;;
+    amd64) expected_sha="e80dbe0d2a2597e3c11c404f03337b981d74b4a8504b70586c354b7697a7c27f" ;;
+  esac
+  expected_sha="${SAC_JQ_SHA256:-$expected_sha}"
+
   jq_url="https://github.com/jqlang/jq/releases/download/jq-${jq_version}/jq-macos-${arch}"
   jq_dest="$HOME/bin/jq"
   jq_tmp="$(mktemp -t goodnight-jq.XXXXXX)"
@@ -270,11 +293,31 @@ ensure_jq() {
     return 1
   fi
 
-  # Basic sanity: should be a real binary (500KB–10MB) that runs.
+  # Basic sanity: plausible binary size (catches CDN error pages
+  # before the SHA-256 check has to do real work).
   local size
   size="$(wc -c <"$jq_tmp" | tr -d ' ')"
   if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size < 500000 || size > 10000000)); then
     warn "Downloaded jq has implausible size (${size} bytes) — skipping."
+    rm -f "$jq_tmp"
+    return 1
+  fi
+
+  # F-02: SHA-256 integrity check against the pinned value. A
+  # mismatch indicates supply-chain compromise, wrong mirror, or the
+  # release binary was re-uploaded (requires re-pinning on our side).
+  # In any of those cases we refuse to install.
+  got_sha="$(shasum -a 256 "$jq_tmp" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$got_sha" ]]; then
+    warn "shasum unavailable — cannot verify jq integrity. Aborting jq install."
+    rm -f "$jq_tmp"
+    return 1
+  fi
+  if [[ "$got_sha" != "$expected_sha" ]]; then
+    warn "jq checksum mismatch — ${C_BOLD}REFUSING${C_RESET} to install."
+    warn "  expected: $expected_sha"
+    warn "  got:      $got_sha"
+    warn "If jq was legitimately re-released, set ${C_BOLD}SAC_JQ_SHA256=<expected>${C_RESET} and re-run."
     rm -f "$jq_tmp"
     return 1
   fi
@@ -296,7 +339,7 @@ ensure_jq() {
   # installer run (future sessions pick it up via the rc file edit
   # in step 8).
   export PATH="$HOME/bin:$PATH"
-  ok "jq ${jq_version} installed at ~/bin/jq"
+  ok "jq ${jq_version} installed at ~/bin/jq (sha256 verified)"
 }
 
 echo ""
