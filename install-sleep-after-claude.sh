@@ -437,7 +437,22 @@ fi
 # drain needed. This is the same idiom used by Homebrew's own
 # installer.
 if [[ -p /dev/stdin ]]; then
-  cat >/dev/null 2>&1 || true
+  # F-11: Bound the drain so a pathological hang on the pipe source
+  # (slow trickle, stuck CDN connection) can't block the installer's
+  # exit indefinitely. 5s comfortably exceeds any real CDN finish-
+  # write for a ~45KB payload.
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 5 cat >/dev/null 2>&1 || true
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout 5 cat >/dev/null 2>&1 || true
+  else
+    # Fallback: background cat + 5s watchdog. Kill the cat if it's
+    # still running when the deadline hits.
+    cat >/dev/null 2>&1 &
+    drain_pid=$!
+    (sleep 5 && kill "$drain_pid" 2>/dev/null) &
+    wait "$drain_pid" 2>/dev/null || true
+  fi
 fi
 
 exit 0
@@ -2306,7 +2321,10 @@ on_interrupt() {
   else
     print_warn "Cancelled."
   fi
-  cleanup_fd_and_tmp
+  # F-12: Don't call cleanup_fd_and_tmp directly here — the EXIT
+  # trap will run it on exit. Calling it both here AND via the EXIT
+  # trap is idempotent today but fragile if future cleanup steps
+  # aren't.
   echo ""
   exit 0
 }
