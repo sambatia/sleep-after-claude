@@ -10,7 +10,7 @@ setup() {
     echo 'AUTO_STARTED_CAFFEINATE_PID=""'
     echo 'NO_AUTO_CAFFEINATE=false'
     sed -n '/^ensure_caffeinate_running() {$/,/^}$/p' "$REPO_ROOT/sleep-after-claude"
-  } > "$BATS_TEST_TMPDIR/ensure.sh"
+  } >"$BATS_TEST_TMPDIR/ensure.sh"
   [ -s "$BATS_TEST_TMPDIR/ensure.sh" ]
 }
 
@@ -32,7 +32,7 @@ setup() {
 }
 
 @test "ensure_caffeinate: leaves existing caffeinate alone" {
-  shim pgrep 'echo 99999; exit 0'  # pretend something is already running
+  shim pgrep 'echo 99999; exit 0' # pretend something is already running
   run bash -c "
     NO_AUTO_CAFFEINATE=false
     BOLD='' DIM='' GREEN='' RESET=''
@@ -49,8 +49,8 @@ setup() {
 }
 
 @test "ensure_caffeinate: starts caffeinate when none running" {
-  shim pgrep 'exit 1'                 # none found
-  shim caffeinate 'sleep 30; exit 0'  # a fake caffeinate that just sleeps
+  shim pgrep 'exit 1'                # none found
+  shim caffeinate 'sleep 30; exit 0' # a fake caffeinate that just sleeps
   run bash -c "
     NO_AUTO_CAFFEINATE=false
     BOLD='' DIM='' GREEN='' RESET=''
@@ -66,4 +66,91 @@ setup() {
   assert_contains "$output" "log: AUTO_CAFFEINATE_STARTED"
   # Cleanup the fake caffeinate we spawned
   pkill -f 'sleep 30' 2>/dev/null || true
+}
+
+@test "F-05: --dry-run does not kill captured caffeinate processes" {
+  sleep 30 &
+  local caff_pid=$!
+
+  sleep 0.2 &
+  local target_pid=$!
+
+  shim pgrep "
+    if [[ \"\$*\" == *caffeinate* ]]; then
+      echo '$caff_pid'
+      exit 0
+    fi
+    exit 1
+  "
+
+  run bash "$REPO_ROOT/sleep-after-claude" \
+    --pid "$target_pid" \
+    --no-preflight \
+    --skip-update-check \
+    --allow-battery \
+    --dry-run \
+    --no-auto-caffeinate \
+    --no-sound
+
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "Dry run complete"
+  kill -0 "$caff_pid" 2>/dev/null
+
+  kill "$caff_pid" 2>/dev/null || true
+  wait "$caff_pid" 2>/dev/null || true
+  wait "$target_pid" 2>/dev/null || true
+}
+
+@test "F-05: --dry-run does not auto-start caffeinate" {
+  sleep 0.2 &
+  local target_pid=$!
+  local started_file="$BATS_TEST_TMPDIR/caffeinate-started"
+
+  shim pgrep 'exit 1'
+  shim caffeinate "echo started > '$started_file'; exit 0"
+
+  run bash "$REPO_ROOT/sleep-after-claude" \
+    --pid "$target_pid" \
+    --no-preflight \
+    --skip-update-check \
+    --allow-battery \
+    --dry-run \
+    --no-sound
+
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "Dry run complete"
+  [ ! -e "$started_file" ]
+
+  wait "$target_pid" 2>/dev/null || true
+}
+
+@test "F-05: --sleep-now --dry-run does not release caffeinate or call pmset sleepnow" {
+  sleep 30 &
+  local caff_pid=$!
+  local pmset_file="$BATS_TEST_TMPDIR/pmset-called"
+
+  shim pgrep "
+    if [[ \"\$*\" == *caffeinate* ]]; then
+      echo '$caff_pid'
+      exit 0
+    fi
+    exit 1
+  "
+  shim pmset "echo \"\$*\" > '$pmset_file'; exit 0"
+
+  run bash "$REPO_ROOT/sleep-after-claude" \
+    --sleep-now \
+    --no-preflight \
+    --skip-update-check \
+    --allow-battery \
+    --dry-run \
+    --no-sound
+
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "Dry run complete"
+  kill -0 "$caff_pid" 2>/dev/null
+  [ ! -e "$pmset_file" ]
+
+  kill "$caff_pid" 2>/dev/null || true
+  wait "$caff_pid" 2>/dev/null || true
 }

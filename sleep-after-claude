@@ -2048,6 +2048,13 @@ if [[ "$SLEEP_NOW" == true ]]; then
       echo ""
     fi
   fi
+  if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
+    play_sound
+    log_event "DRY_RUN_EXIT (sleep-now)"
+    exit 0
+  fi
   # Release any caffeinate processes already running so macOS is free
   # to sleep. Don't auto-start a new one — we're sleeping immediately.
   # shellcheck disable=SC2207
@@ -2112,9 +2119,13 @@ if [[ "$SMART_WATCH" == true ]]; then
       fi
     fi
   fi
-  ensure_caffeinate_running
-  # shellcheck disable=SC2207
-  INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  if [[ "$DRY_RUN" == true ]]; then
+    INITIAL_CAFF_PIDS=()
+  else
+    ensure_caffeinate_running
+    # shellcheck disable=SC2207
+    INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  fi
 
   echo ""
   echo -e "  ${BOLD}Smart watch${RESET}"
@@ -2247,13 +2258,17 @@ if [[ "${SMART_WATCH_DONE:-false}" != true ]]; then
   # If no caffeinate is active we start one now so the Mac doesn't
   # drift to sleep while we're watching. Skippable with
   # --no-auto-caffeinate for users who manage caffeinate themselves.
-  ensure_caffeinate_running
+  if [[ "$DRY_RUN" == true ]]; then
+    INITIAL_CAFF_PIDS=()
+  else
+    ensure_caffeinate_running
 
-  # ── Capture caffeinate PIDs at start ──────────────────────────
-  # Captured AFTER ensure_caffeinate_running so any auto-started
-  # caffeinate is included and will be released at the end of watch.
-  # shellcheck disable=SC2207
-  INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+    # ── Capture caffeinate PIDs at start ──────────────────────────
+    # Captured AFTER ensure_caffeinate_running so any auto-started
+    # caffeinate is included and will be released at the end of watch.
+    # shellcheck disable=SC2207
+    INITIAL_CAFF_PIDS=($(pgrep caffeinate 2>/dev/null || true))
+  fi
 
   TIMEOUT_SECS=$((TIMEOUT_HOURS * 3600))
 
@@ -2371,6 +2386,14 @@ if [[ "$SKIP_PREFLIGHT" == false ]]; then
   fi
 fi
 
+if [[ "$DRY_RUN" == true ]]; then
+  echo ""
+  print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
+  play_sound
+  log_event "DRY_RUN_EXIT"
+  exit 0
+fi
+
 # ── Release caffeinate ────────────────────────────────────────
 echo ""
 print_step "Releasing caffeinate..."
@@ -2408,13 +2431,6 @@ fi
 
 # ── Early exits ───────────────────────────────────────────────
 echo ""
-
-if [[ "$DRY_RUN" == true ]]; then
-  print_done "Dry run complete — ${BOLD}not sleeping${RESET} the Mac."
-  play_sound
-  log_event "DRY_RUN_EXIT"
-  exit 0
-fi
 
 if [[ "$CAFFEINATE_ONLY" == true ]]; then
   print_done "Caffeinate released. Mac will sleep on its own idle timer."
