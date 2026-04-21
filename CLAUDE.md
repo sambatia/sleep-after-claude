@@ -284,3 +284,12 @@ First audit → remediation → test expansion → docs sync cycle covering the 
   - Preflight fails closed (not open) on unknown pmset state — a silent "clear" verdict is the worst possible failure for this tool.
 
 > **Note on finding-ID overlap.** The 2026-04-19 and 2026-04-20 cycles both number their findings `F-01…F-NN` independently — the IDs are scoped to the cycle they appear in, not globally unique. A commit message referencing `F-07` means "F-07 of the cycle this commit belongs to." When in doubt, check the commit date.
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
